@@ -80,7 +80,13 @@ SITES = _system_prompt_sites()
 # decision: the text this function builds is trusted prose in every
 # generation, so every non-literal in it is driven below.
 DRIVEN_SITES = {
-    "brain.command": "brain.Brain.launch_prompt",
+    # Test stand-in: the launch prompt is still an argv element.
+    "brain._session_command": "brain.Brain.launch_prompt",
+    # Production: `supervise` receives the same string and puts it on the
+    # first Cursor CLI prompt. The text is `Brain.launch_prompt()`.
+    "cursor_cli.supervise_argv": "brain.Brain.launch_prompt",
+    # Parses that argv back out. It does not build a second prompt.
+    "cursor_cli._parse_supervise": "brain.Brain.launch_prompt",
 }
 
 

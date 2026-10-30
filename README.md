@@ -93,7 +93,7 @@ seconds per sentence. On a Mac, follow the download steps in
   `docs/superpowers/specs/YYYY-MM-DD-<topic>-design.md` *inside the project
   being built* — before a single process is spawned. You can read it back by
   numbered section and approve it by voice, or open it on the dashboard.
-- **Drives the build.** A build is a real `claude -p` session handed a brief
+- **Drives the build.** A build is a real `agent -p` session handed a brief
   that tells it to write a phased plan, review that plan against the spec,
   then execute it task by task under test-driven development, ticking the
   plan's checkboxes as it goes. "How far has it got" is answered by reading
@@ -146,16 +146,10 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
   server-side transcription to fall back on.
-- **An xAI API key and Aider.** Default preflight (`preflight.run_checks`)
-  fails without `XAI_API_KEY`, `aider` on PATH, and one Aider provider key
-  (see `.env.example`). `grok_tools.py` exports JARVIS's MCP tools in the
-  shape `api.x.ai` function-calling expects. `brain.py` and `run_executor.py`
-  still spawn `claude -p`; that switch is a follow-up.
-- **Claude Code, installed and logged in.** `npm install -g
-  @anthropic-ai/claude-code` (2.1.224 or newer), then run `claude` once and
-  log in. This is still what the voice brain and the run pipeline spawn.
-  Those two checks are opt-in (`include_legacy_claude=True`), not part of
-  default preflight.
+- **The Cursor CLI, logged in.** Install `agent` (or `cursor-agent`) and run
+  `agent login` once. That login is what the voice brain and every
+  construction run use. Default preflight checks the binary with `--help`
+  or `--version`. No xAI key, no Aider key, and no Cursor API key.
 - **Python 3.11+** and **Node.js 18+**.
 - **Local CosyVoice.** A checkout of FunAudioLLM/CosyVoice plus the
   CosyVoice2-0.5B weights (not in git), a short prompt wav, and
@@ -184,9 +178,8 @@ COSYVOICE_MODEL_DIR=/path/to/CosyVoice2-0.5B   # required, local weights
 COSYVOICE_PROMPT_WAV=/path/to/prompt.wav       # voice to clone
 COSYVOICE_PROMPT_TEXT=The words in that wav.
 COSYVOICE_DEVICE=cpu            # cpu (slow), cuda, or mps
-XAI_API_KEY=...                 # required by default preflight (Grok path)
-# OPENAI_API_KEY=...            # one Aider provider key; see .env.example
-# JARVIS_BRAIN_MODEL=sonnet     # optional: the brain's model (claude -p today)
+# JARVIS_CURSOR_AGENT=/usr/local/bin/agent   # optional; else `agent` on PATH
+# JARVIS_BRAIN_MODEL=sonnet     # optional: passed as `agent -p --model`
 # USER_NAME=Tony                # optional: what he calls you
 ```
 
@@ -396,14 +389,13 @@ that opened clean. That is the strongest guarantee this design can actually
 keep, not a claim that the suggestion is gone.
 
 **Every spawned run has full privileges.** `JARVIS_SKIP_PERMISSIONS`
-defaults on, so every run passes `--dangerously-skip-permissions`
-(`run_executor.py`) — there is no TTY to answer a permission prompt, so
+defaults on, so every run passes `--force` (`run_executor.py` via
+`cursor_cli.py`) — there is no TTY to answer a permission prompt, so
 without it a run hangs forever instead of doing its job. A run is therefore
 a full-privilege process on your machine, in whatever directory you pointed
-it at, scrubbed only of `ANTHROPIC_*`/`CLAUDE_CODE_*` environment variables
-(`claude_env.py`), not of filesystem access. It can write anything you could
-write by hand, including the Claude Code session roster and transcripts that
-JARVIS himself later reads back as another session's words.
+it at. The child environment drops `ANTHROPIC_*`, `CLAUDE_CODE_*`,
+`XAI_API_KEY` and `CURSOR_API_KEY` (`cursor_cli.child_env`), not filesystem
+access. It can write anything you could write by hand.
 
 **Loopback is trusted.** Anything on this machine that can present an
 `Origin` of `http://localhost:5173` through `5180`, or the API port itself
