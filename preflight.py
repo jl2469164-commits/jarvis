@@ -1,11 +1,14 @@
 """
 JARVIS preflight -- first-run environment checks.
 
-Every one of these has already bitten this project: `claude` missing or too
-old, not logged in (the voice brain runs on the user's *subscription*, never
-an API key -- see brain.py's SCRUBBED_ENV_PREFIXES), `crossSessionInbound`
-not accepting steers into other sessions, `osascript` lacking Accessibility
-so `answer_dialog`'s keystroke fails, and no Fish Audio key at all.
+Startup checks for the Grok-API brain + Aider construction path: `XAI_API_KEY`,
+`aider` on PATH and a provider model key, plus Fish Audio, Accessibility,
+Screen Recording, and (still reported) Claude leftover / cross-session hints.
+Legacy `_check_claude_*` helpers remain in this file for tests and for
+`run_checks(include_legacy_claude=True)`, but they are not part of the
+default `run_checks()`. `brain.py` and `run_executor.py` still spawn
+`claude -p` until that follow-up; this module only observes the environment
+the follow-up will need.
 
 This module only *observes*. Nothing here writes a file, changes a setting,
 or grants a permission -- see `_check_cross_session_inbound_sync`'s
@@ -452,14 +455,13 @@ def _check_fish_api_key_sync() -> Check:
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
-    """A leftover ANTHROPIC_* var signals a misconfigured .env.
+    """Report ANTHROPIC_* variables. The Grok path does not read them.
 
-    brain.py already scrubs every ANTHROPIC_* variable from the brain's
-    child process (see SCRUBBED_ENV_PREFIXES), so this can no longer make
-    the voice path silently bill an API key. It is still worth reporting:
-    its presence means someone put an Anthropic API key in `.env`, which is
-    not how this project authenticates (see brain-subscription-only-env-scrub
-    history) and is a sign the rest of the setup may be off too.
+    `claude_env.child_env()` still scrubs every ANTHROPIC_* variable from any
+    Claude Code child, because that CLI prefers an inherited key over a
+    subscription login. `ANTHROPIC_API_KEY` is also one of the names
+    `_check_aider_model_key_sync` accepts, so this stays a warning: keep that
+    one key only when Aider should call Anthropic.
     """
     leftover = sorted(k for k in os.environ if k.startswith("ANTHROPIC_"))
     if not leftover:
@@ -472,12 +474,12 @@ def _check_anthropic_key_leftover_sync() -> Check:
         name="anthropic_key_leftover",
         status=STATUS_WARN,
         message=(
-            f"{', '.join(leftover)} set in the environment. brain.py scrubs these "
-            "from the brain's child process, but this signals a misconfigured .env."
+            f"{', '.join(leftover)} set in the environment. The Grok voice path "
+            "does not read these, and Claude children still have them scrubbed."
         ),
         remedy=(
-            "Remove ANTHROPIC_* variables from .env -- JARVIS's voice brain runs "
-            "on your Claude subscription, not an API key."
+            "Keep ANTHROPIC_API_KEY only if Aider should call Anthropic. "
+            "Remove any other ANTHROPIC_* variables from .env."
         ),
     )
 
@@ -624,10 +626,104 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
     return True, str(path)
 
 
+# ── Grok / Aider brain+build preflight (default gate) ────────────────────
+
+# `.env.example` uses placeholders of the form your-...-here. Copying the
+# template must not look like a configured key.
+_PLACEHOLDER_SECRET = re.compile(r"^your-.+-here$")
+
+
+def _configured_secret(name: str) -> bool:
+    """True when `name` is set to something other than a documented placeholder."""
+    value = os.environ.get(name, "").strip()
+    if not value or _PLACEHOLDER_SECRET.fullmatch(value):
+        return False
+    return True
+
+
+def _check_xai_api_key_sync() -> Check:
+    """XAI_API_KEY must be set for a Grok-API brain path."""
+    if _configured_secret("XAI_API_KEY"):
+        return Check(name="xai_api_key", status=STATUS_OK, message="XAI_API_KEY is set.")
+    return Check(
+        name="xai_api_key",
+        status=STATUS_FAIL,
+        message="XAI_API_KEY is not set.",
+        remedy="Create an API key at https://console.x.ai/ and set XAI_API_KEY in .env.",
+    )
+
+
+# Env vars Aider commonly uses for model providers (any one is enough).
+# XAI_API_KEY is the voice-brain key and is checked on its own; Aider reads
+# a provider key from this list (OpenAI-compatible xAI setups use
+# OPENAI_API_KEY plus a base URL, not XAI_API_KEY).
+_AIDER_MODEL_KEY_VARS = (
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "DEEPSEEK_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "ANTHROPIC_API_KEY",  # Aider can still use Anthropic; Claude children scrub it
+    "AZURE_API_KEY",
+    "COHERE_API_KEY",
+)
+
+
+async def _check_aider_installed(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
+    """Aider must be on PATH for the construction / run_executor path."""
+    aider = shutil.which("aider")
+    if not aider:
+        return Check(
+            name="aider_installed",
+            status=STATUS_FAIL,
+            message="`aider` is not on PATH.",
+            remedy="Install Aider (e.g. `pipx install aider-chat`) and ensure it is on PATH.",
+        )
+    rc, stdout, stderr = await _run_subprocess(aider, "--version", timeout=timeout)
+    ver = (stdout or stderr or "").strip().splitlines()[:1]
+    ver_s = ver[0] if ver else f"exit {rc}"
+    if rc != 0:
+        return Check(
+            name="aider_installed",
+            status=STATUS_WARN,
+            message=f"`aider` found at {aider} but `--version` failed: {ver_s}",
+            remedy="Reinstall Aider or fix the binary on PATH.",
+        )
+    return Check(
+        name="aider_installed",
+        status=STATUS_OK,
+        message=f"Aider available ({ver_s}).",
+    )
+
+
+def _check_aider_model_key_sync() -> Check:
+    """At least one common Aider provider API key should be present."""
+    present = [k for k in _AIDER_MODEL_KEY_VARS if _configured_secret(k)]
+    if present:
+        return Check(
+            name="aider_model_key",
+            status=STATUS_OK,
+            message=f"Aider model key(s) set: {', '.join(present)}.",
+        )
+    return Check(
+        name="aider_model_key",
+        status=STATUS_FAIL,
+        message="No Aider provider API key found in the environment.",
+        remedy=(
+            "Set a key Aider can use for your chosen model, e.g. OPENAI_API_KEY, "
+            "OPENROUTER_API_KEY, DEEPSEEK_API_KEY, or GEMINI_API_KEY in .env "
+            "(see https://aider.chat/docs/llms.html)."
+        ),
+    )
+
+
 # ── running them all ─────────────────────────────────────────────────────
 
-_ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-_SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+# Opt-in only. Default startup must not require the Claude CLI.
+_LEGACY_CLAUDE_CHECKS = (_check_claude_cli, _check_claude_login)
+_ASYNC_CHECKS = (_check_aider_installed, _check_accessibility)
+_SYNC_CHECKS = (_check_xai_api_key_sync, _check_aider_model_key_sync,
+                _check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
                 _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -656,13 +752,21 @@ async def _run_one(fn, *, is_async: bool, timeout: float) -> Check:
         return Check(name=name, status=STATUS_WARN, message=f"Check '{name}' raised: {e}")
 
 
-async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT) -> list[Check]:
+async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT,
+                     include_legacy_claude: bool = False) -> list[Check]:
     """Run every environment check concurrently, each individually time-boxed.
 
     Never raises. Safe to call at startup: the worst case is a handful of
     `warn` results after `timeout` seconds, not a hung or crashed server.
+
+    `include_legacy_claude` adds `claude_cli` and `claude_login`. Default
+    startup leaves them off: the Grok/Aider gate is `xai_api_key`,
+    `aider_installed`, and `aider_model_key`.
     """
-    tasks = [_run_one(fn, is_async=True, timeout=timeout) for fn in _ASYNC_CHECKS]
+    async_checks = list(_ASYNC_CHECKS)
+    if include_legacy_claude:
+        async_checks = list(_LEGACY_CLAUDE_CHECKS) + async_checks
+    tasks = [_run_one(fn, is_async=True, timeout=timeout) for fn in async_checks]
     tasks += [_run_one(fn, is_async=False, timeout=timeout) for fn in _SYNC_CHECKS]
     return await asyncio.gather(*tasks)
 
@@ -675,6 +779,14 @@ async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT) -> list[Check]:
 # the specific failure (e.g. "isn't installed" vs. "needs updating").
 def _phrase_for(check: Check) -> str:
     name, msg = check.name, check.message
+    if name == "xai_api_key":
+        return "there's no XAI API key"
+    if name == "aider_installed":
+        if "not on PATH" in msg:
+            return "Aider isn't installed"
+        return "Aider couldn't be checked"
+    if name == "aider_model_key":
+        return "there's no Aider model API key"
     if name == "claude_cli":
         if "not on PATH" in msg:
             return "Claude Code isn't installed"

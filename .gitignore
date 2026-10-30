@@ -19,8 +19,10 @@ data/*.jsonl
 data/active_session.json
 data/.jarvis_output.txt
 
-# Certificates
+# Certificates (local HTTPS from scripts/generate_https_certs.sh)
 *.pem
+cert.pem
+key.pem
 
 # Build
 dist/

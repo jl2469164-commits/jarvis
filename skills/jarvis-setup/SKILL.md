@@ -35,7 +35,22 @@ else looks fine, the first question is "did the URL's port change" — check
 `chrome://settings/content/microphone` for the exact origin in use, not just
 "is the mic allowed somewhere."
 
-## JARVIS runs on the Claude Code subscription — never an API key
+## This fork's default preflight is XAI + Aider
+
+`preflight.run_checks()` does not include `claude_cli` or `claude_login`.
+It fails when `XAI_API_KEY` is missing (the `.env.example` placeholder
+`your-xai-api-key-here` counts as missing), when `aider` is not on PATH, or
+when none of the Aider provider keys in `preflight._AIDER_MODEL_KEY_VARS`
+is set. Pass `include_legacy_claude=True` to run the Claude checks as well.
+
+`brain.py` and `run_executor.py` still spawn `claude -p`. A machine can pass
+the new preflight and still have no voice brain, or fail preflight while
+Claude itself would have worked. `grok_tools.as_openai_functions()` is the
+OpenAI-style export of `jarvis_mcp.TOOL_SPECS` for `api.x.ai`; nothing in
+the voice loop calls it yet. Read `_ASYNC_CHECKS` / `_SYNC_CHECKS` in
+`preflight.py` rather than assuming the subscription gate is what startup runs.
+
+## JARVIS's running brain is still the Claude Code subscription — never an API key
 
 The voice brain (`brain.py`) is one long-lived `claude -p` process
 authenticated by the user's `claude` login, not the Anthropic API.
@@ -46,12 +61,14 @@ silently *prefers* an inherited `ANTHROPIC_API_KEY` over the logged-in
 session, without saying so (`claude auth status` still reports
 `loggedIn: true` while billing moves to the key). So:
 
-- Putting `ANTHROPIC_API_KEY` in `.env` is not a setup step and does nothing
-  useful — it is a leftover from a different project's instructions, or a
-  misunderstanding, and is worth flagging if you see it.
-- Setup is exactly: install Claude Code (`npm install -g
-  @anthropic-ai/claude-code`, 2.1.224 or newer) and run `claude` once to log
-  in with a Claude subscription. No key, anywhere.
+- Putting `ANTHROPIC_API_KEY` in `.env` does not authenticate the voice brain.
+  Claude children have it scrubbed, and preflight warns
+  (`anthropic_key_leftover`). Keep that one name only if Aider should call
+  Anthropic — it is in `_AIDER_MODEL_KEY_VARS`. Any other `ANTHROPIC_*`
+  variable is a leftover and should come out.
+- The processes that still spawn `claude` need Claude Code installed
+  (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or newer) and `claude`
+  logged in with a subscription. Default preflight does not check that.
 
 ## An expired login sounds like a JARVIS problem, not an auth problem
 

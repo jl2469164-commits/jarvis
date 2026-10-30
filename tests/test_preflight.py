@@ -514,7 +514,7 @@ async def test_run_checks_never_raises_even_with_a_broken_check(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_checks_runs_all_registered_checks(monkeypatch):
-    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)  # claude missing -> fast fail
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)  # aider missing -> fast fail
     monkeypatch.setattr(preflight.sys, "platform", "linux")  # accessibility skipped -> fast warn
     monkeypatch.delenv("FISH_API_KEY", raising=False)
     monkeypatch.setattr(preflight, "_settings_path", lambda: preflight.Path("/nonexistent/settings.json"))
@@ -522,9 +522,12 @@ async def test_run_checks_runs_all_registered_checks(monkeypatch):
     results = await preflight.run_checks(timeout=1.0)
     names = {c.name for c in results}
     assert names == {
-        "claude_cli", "claude_login", "accessibility", "screen_recording",
+        "aider_installed", "accessibility", "screen_recording",
+        "xai_api_key", "aider_model_key",
         "fish_api_key", "anthropic_key_leftover", "cross_session_inbound",
     }
+    assert "claude_cli" not in names
+    assert "claude_login" not in names
 
 
 # --- spoken_summary -------------------------------------------------------------
@@ -596,3 +599,142 @@ def test_spoken_summary_warn_counts_as_something_wrong():
     summary = preflight.spoken_summary(checks)
     assert summary != ""
     assert "One thing needs attention" in summary
+
+
+# --- XAI_API_KEY / Aider (default gate) ---------------------------------------
+
+def test_xai_api_key_present(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-key-not-real")
+    check = preflight._check_xai_api_key_sync()
+    assert check.name == "xai_api_key"
+    assert check.status == STATUS_OK
+    assert check.remedy is None
+    assert "xai-test-key-not-real" not in check.message
+
+
+def test_xai_api_key_absent(monkeypatch):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    check = preflight._check_xai_api_key_sync()
+    assert check.status == STATUS_FAIL
+    assert check.remedy
+    assert "console.x.ai" in check.remedy
+
+
+def test_xai_api_key_placeholder_is_not_configured(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "your-xai-api-key-here")
+    check = preflight._check_xai_api_key_sync()
+    assert check.status == STATUS_FAIL
+
+
+def test_aider_model_key_present_names_the_variable_not_the_secret(monkeypatch):
+    for key in preflight._AIDER_MODEL_KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-not-real")
+    check = preflight._check_aider_model_key_sync()
+    assert check.name == "aider_model_key"
+    assert check.status == STATUS_OK
+    assert "OPENROUTER_API_KEY" in check.message
+    assert "sk-or-test-not-real" not in check.message
+
+
+def test_aider_model_key_absent(monkeypatch):
+    for key in preflight._AIDER_MODEL_KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    check = preflight._check_aider_model_key_sync()
+    assert check.status == STATUS_FAIL
+    assert check.remedy
+    assert "OPENAI_API_KEY" in check.remedy
+
+
+def test_aider_model_key_placeholder_does_not_count(monkeypatch):
+    for key in preflight._AIDER_MODEL_KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "your-openai-api-key-here")
+    check = preflight._check_aider_model_key_sync()
+    assert check.status == STATUS_FAIL
+
+
+@pytest.mark.asyncio
+async def test_aider_missing_from_path(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
+    check = await preflight._check_aider_installed()
+    assert check.name == "aider_installed"
+    assert check.status == STATUS_FAIL
+    assert "PATH" in check.message
+    assert check.remedy
+
+
+@pytest.mark.asyncio
+async def test_aider_present_and_version_ok(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: "/usr/local/bin/aider")
+    monkeypatch.setattr(
+        preflight, "_run_subprocess",
+        _fake_run_subprocess({("/usr/local/bin/aider", "--version"): (0, "aider 0.86.1\n", "")}),
+    )
+    check = await preflight._check_aider_installed()
+    assert check.status == STATUS_OK
+    assert "0.86.1" in check.message
+    assert check.remedy is None
+
+
+@pytest.mark.asyncio
+async def test_aider_version_failure_is_warn(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: "/usr/local/bin/aider")
+    monkeypatch.setattr(
+        preflight, "_run_subprocess",
+        _fake_run_subprocess({("/usr/local/bin/aider", "--version"): (1, "", "broken")}),
+    )
+    check = await preflight._check_aider_installed()
+    assert check.status == STATUS_WARN
+    assert check.remedy
+
+
+def test_spoken_summary_names_the_grok_and_aider_failures():
+    checks = [
+        Check(name="xai_api_key", status=STATUS_FAIL, message="XAI_API_KEY is not set."),
+        Check(name="aider_installed", status=STATUS_FAIL, message="`aider` is not on PATH."),
+        Check(name="aider_model_key", status=STATUS_FAIL,
+              message="No Aider provider API key found in the environment."),
+    ]
+    summary = preflight.spoken_summary(checks)
+    assert summary.startswith("3 things need attention, sir:")
+    assert "there's no XAI API key" in summary
+    assert "Aider isn't installed" in summary
+    assert "there's no Aider model API key" in summary
+
+
+@pytest.mark.asyncio
+async def test_legacy_claude_checks_are_opt_in(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
+    monkeypatch.setattr(preflight.sys, "platform", "linux")
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    for key in preflight._AIDER_MODEL_KEY_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(preflight, "_settings_path", lambda: preflight.Path("/nonexistent/settings.json"))
+
+    default = {c.name for c in await preflight.run_checks(timeout=1.0)}
+    assert "claude_cli" not in default
+    assert "claude_login" not in default
+
+    legacy = {c.name for c in await preflight.run_checks(
+        timeout=1.0, include_legacy_claude=True)}
+    assert legacy == default | {"claude_cli", "claude_login"}
+
+
+def test_env_example_documents_xai_and_aider_with_placeholders_only():
+    """The template is copied to .env on first settings write. Placeholders only."""
+    from pathlib import Path
+    text = (Path(__file__).parent.parent / ".env.example").read_text(encoding="utf-8")
+    assert "XAI_API_KEY=" in text
+    for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "GEMINI_API_KEY"):
+        assert name in text
+    assert "Aider" in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        _key, _, value = stripped.partition("=")
+        assert value.startswith("your-") and value.endswith("-here"), stripped
+        assert not value.startswith("sk-")
+        assert not value.startswith("xai-")

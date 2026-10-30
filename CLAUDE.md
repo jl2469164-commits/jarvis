@@ -10,10 +10,17 @@ key, what an expired login sounds like, Accessibility) that were only learned
 by hitting them live, and this walkthrough assumes them.
 
 When a user clones this repo and starts Claude Code, help them:
-1. Copy .env.example to .env
-2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-   newer) and log in with `claude` — JARVIS's brain runs on your Claude
-   subscription, not on an API key
+1. Copy .env.example to .env (placeholders only — never commit a real `.env`)
+2. Set what default preflight checks, and install what the processes still spawn:
+   - `XAI_API_KEY` from https://console.x.ai/ (Grok voice-brain path)
+   - `aider` on PATH, plus one provider key listed in `.env.example`
+     (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`,
+     `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AZURE_API_KEY`, `COHERE_API_KEY`,
+     or `ANTHROPIC_API_KEY`)
+   - Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
+     newer) and `claude` login. `brain.py` and `run_executor.py` still spawn
+     `claude -p`. `claude_cli` / `claude_login` are not in default
+     `run_checks()`; pass `include_legacy_claude=True` to run them.
 3. Get a Fish Audio API key from fish.audio (required — there is no fallback
    voice)
 4. Install Python dependencies: pip install -r requirements.txt
@@ -21,7 +28,9 @@ When a user clones this repo and starts Claude Code, help them:
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
 7. Generate the SSL certs — see below, they are NOT optional:
-   `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'`
+   `./scripts/generate_https_certs.sh`
+   (same openssl invocation: `cert.pem` + `key.pem`, CN=localhost, 365 days;
+   both names are gitignored)
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
@@ -41,7 +50,11 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
 - **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
-  the user's subscription; no Anthropic API calls on the voice path
+  the user's subscription; no Anthropic API calls on the voice path.
+  Default preflight on this fork expects `XAI_API_KEY` and Aider instead
+  (`preflight.run_checks`); `grok_tools.py` exports `jarvis_mcp.TOOL_SPECS`
+  as OpenAI-style functions for `api.x.ai`. Switching `brain.py` and
+  `run_executor.py` off `claude -p` is not done yet.
 - **TTS**: Fish Audio with JARVIS voice model
 - **System**: AppleScript for Terminal and Chrome integration
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
@@ -146,16 +159,25 @@ live convention: `builds.py` and `specs.py` create them **inside the projects
 JARVIS builds**. It is only this repository's own copies that are gone.
 
 ## Environment Variables
-- `ANTHROPIC_API_KEY` — **read by nothing.** Not asked for in setup, not read
-  by any module, and the `anthropic` SDK is not a dependency: JARVIS's brain
-  and every spawned run go through your Claude Code subscription login.
-  `claude_env.child_env()` scrubs every `ANTHROPIC_*` variable from every
-  spawned Claude Code child (brain and run pipeline alike) so the CLI can
-  never bill an API key instead, and `preflight.py`'s `anthropic_key_leftover`
-  check warns you if one is sitting in your `.env` — that is the only place
-  the name appears in live code.
+- `XAI_API_KEY` — required by default preflight for the Grok voice-brain
+  path (`https://console.x.ai/`). The documented placeholder
+  `your-xai-api-key-here` counts as unset. `brain.py` does not call the API
+  yet; `grok_tools.as_openai_functions()` is the tool list that call will send.
+- Aider — default preflight also requires `aider` on PATH (`aider_installed`)
+  and one provider key (`aider_model_key`): `OPENAI_API_KEY`,
+  `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`,
+  `GOOGLE_API_KEY`, `AZURE_API_KEY`, `COHERE_API_KEY`, or
+  `ANTHROPIC_API_KEY`. `run_executor.py` still spawns `claude -p`.
+- `ANTHROPIC_API_KEY` — not read by the voice brain, and the `anthropic` SDK
+  is not a dependency. `claude_env.child_env()` scrubs every `ANTHROPIC_*`
+  variable from every spawned Claude Code child so the CLI can never bill an
+  API key instead. `preflight.py`'s `anthropic_key_leftover` check warns if
+  one is set. The same name is also accepted as an Aider provider key; keep
+  it only when Aider should call Anthropic. Legacy Claude CLI/login checks
+  stay in `preflight.py` and run only with
+  `run_checks(include_legacy_claude=True)`.
 - `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the brain,
-  always passed explicitly as `--model`
+  always passed explicitly as `--model` to `claude -p` today
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo

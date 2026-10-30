@@ -144,9 +144,16 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
   Web Speech API (`SpeechRecognition` / `webkitSpeechRecognition`, see
   `frontend/src/voice.ts`), which Firefox has never implemented. There is no
   server-side transcription to fall back on.
+- **An xAI API key and Aider.** Default preflight (`preflight.run_checks`)
+  fails without `XAI_API_KEY`, `aider` on PATH, and one Aider provider key
+  (see `.env.example`). `grok_tools.py` exports JARVIS's MCP tools in the
+  shape `api.x.ai` function-calling expects. `brain.py` and `run_executor.py`
+  still spawn `claude -p`; that switch is a follow-up.
 - **Claude Code, installed and logged in.** `npm install -g
   @anthropic-ai/claude-code` (2.1.224 or newer), then run `claude` once and
-  log in. This is what JARVIS runs on.
+  log in. This is still what the voice brain and the run pipeline spawn.
+  Those two checks are opt-in (`include_legacy_claude=True`), not part of
+  default preflight.
 - **Python 3.11+** and **Node.js 18+**.
 - **A Fish Audio API key.** Required; there is no fallback voice.
 
@@ -165,11 +172,13 @@ cd frontend && npm install && cd ..
 ```
 
 **Fill in the `.env`.** `.env.example` documents the lot; the short version is
-one required key and three optional ones:
+the keys default preflight asks for, plus Fish Audio:
 
 ```env
 FISH_API_KEY=...            # required, no fallback
-# JARVIS_BRAIN_MODEL=sonnet # optional: the brain's model
+XAI_API_KEY=...             # required by default preflight (Grok path)
+# OPENAI_API_KEY=...        # one Aider provider key; see .env.example
+# JARVIS_BRAIN_MODEL=sonnet # optional: the brain's model (claude -p today)
 # FISH_VOICE_ID=...         # optional: a different voice
 # USER_NAME=Tony            # optional: what he calls you
 ```
@@ -177,8 +186,11 @@ FISH_API_KEY=...            # required, no fallback
 **Generate the certificates.** These are not optional:
 
 ```bash
-openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
+./scripts/generate_https_certs.sh
 ```
+
+That writes `cert.pem` and `key.pem` (self-signed, CN=localhost, 365 days)
+and is the same openssl invocation as before. Both files are gitignored.
 
 `server.py` serves HTTPS whenever `cert.pem` and `key.pem` sit beside it, and
 `frontend/vite.config.ts` proxies `/api` and `/ws` to
