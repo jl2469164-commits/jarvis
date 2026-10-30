@@ -27,7 +27,7 @@ import usage_store
 log = logging.getLogger("jarvis.brain")
 
 # The brain runs on the user's Claude subscription — never on an API key. Any of
-# these in the server's environment (they come from .env for Fish/other features)
+# these in the server's environment (they come from .env)
 # would make the CLI authenticate with the key instead of the login.
 #
 # Re-exported from claude_env, which is where the scrub now lives: the run

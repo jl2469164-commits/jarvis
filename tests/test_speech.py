@@ -1177,6 +1177,17 @@ def _mp3(seconds: float, kbps: int = 128) -> bytes:
     return head + bytes(int(seconds * kbps * 1000 / 8) - 4)
 
 
+def test_wav_seconds_reads_a_pcm_wav_cosyvoice_would_return():
+    import speech
+    import tts
+    pcm = b"\x00\x00" * 24000
+    blob = tts.pcm16_wav(pcm, 24000)
+    assert blob[:4] == b"RIFF"
+    assert abs(speech.wav_seconds(blob) - 1.0) < 0.01
+    assert speech.wav_seconds(b"not a wav") == 0.0
+    assert abs(speech.ack_floor_seconds(blob) - 0.9) < 0.02
+
+
 def test_mp3_seconds_reads_the_frame_header_and_nothing_else():
     import speech
     assert abs(speech.mp3_seconds(_mp3(2.0)) - 2.0) < 0.01

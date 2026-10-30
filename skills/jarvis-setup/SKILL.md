@@ -109,14 +109,26 @@ does not follow the app there. Move it to `/Applications` and relaunch.
 error `-1728` / "not allowed assistive access") without ever triggering the
 permission prompt itself, and its remedy text carries this same guidance.
 
-## `FISH_API_KEY` is genuinely required — there is no fallback voice
+## Voice is local CosyVoice — there is no cloud TTS fallback
 
-`tts.py` calls the Fish Audio API directly; if the key is missing or empty,
-`synthesize_chunk` simply returns `None` — no error, no local TTS, no
-built-in voice of any kind. Without a real key from
-[fish.audio](https://fish.audio/), JARVIS has no voice at all, which reads
-to a new user as "it's just broken." This is the one piece of setup that
-cannot be skipped or worked around.
+`tts.py` synthesizes one WAV per sentence with CosyVoice (CosyVoice2 when
+`cosyvoice2.yaml` is in the model directory). The browser still decodes that
+blob with `AudioContext.decodeAudioData`; the orb UI is unchanged. If
+`COSYVOICE_MODEL_DIR` is missing, the prompt wav/text (or speaker id) is
+missing, or `import cosyvoice` fails, `synthesize_chunk` returns `None` and
+JARVIS goes silent — the reply shows up as text. That reads as "it's broken"
+to a new user. The install (checkout, weights, env) is `docs/cosyvoice.md`.
+
+`COSYVOICE_DEVICE=cpu` is the path that works without a GPU, including on a
+Mac. It is slow: several seconds per sentence. `cuda` is for NVIDIA.
+`mps` is best-effort on Apple Silicon; a failed op means switch back to
+`cpu` and restart. Intel Macs stay on `cpu`.
+
+The settings panel is Settings → Voice (CosyVoice). Test CosyVoice checks
+the folder and `import cosyvoice`. It does not download weights. A Mac user
+who needs the clone path, the 2 GB download, `afconvert`, and where to put
+the files should follow `docs/cosyvoice.md` and not a shorter paraphrase.
+Preflight check name is `cosyvoice`.
 
 ## Connecting a service: one file, and it is not the one you'd guess
 

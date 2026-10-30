@@ -2,7 +2,7 @@
 JARVIS preflight -- first-run environment checks.
 
 Startup checks for the Grok-API brain + Aider construction path: `XAI_API_KEY`,
-`aider` on PATH and a provider model key, plus Fish Audio, Accessibility,
+`aider` on PATH and a provider model key, plus local CosyVoice, Accessibility,
 Screen Recording, and (still reported) Claude leftover / cross-session hints.
 Legacy `_check_claude_*` helpers remain in this file for tests and for
 `run_checks(include_legacy_claude=True)`, but they are not part of the
@@ -42,6 +42,7 @@ from typing import Optional
 
 import claude_env
 import screen
+import tts
 
 log = logging.getLogger("jarvis.preflight")
 
@@ -442,15 +443,17 @@ def _check_screen_recording_sync() -> Check:
     )
 
 
-def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
-        return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+def _check_cosyvoice_sync() -> Check:
+    """Local CosyVoice must be configured or JARVIS has no voice.
+
+    Filesystem and import checks only. This does not load the weights.
+    """
+    ready = tts.readiness()
     return Check(
-        name="fish_api_key",
-        status=STATUS_FAIL,
-        message="FISH_API_KEY is not set.",
-        remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
+        name="cosyvoice",
+        status=ready.status,
+        message=ready.message,
+        remedy=ready.remedy,
     )
 
 
@@ -723,7 +726,7 @@ def _check_aider_model_key_sync() -> Check:
 _LEGACY_CLAUDE_CHECKS = (_check_claude_cli, _check_claude_login)
 _ASYNC_CHECKS = (_check_aider_installed, _check_accessibility)
 _SYNC_CHECKS = (_check_xai_api_key_sync, _check_aider_model_key_sync,
-                _check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+                _check_cosyvoice_sync, _check_anthropic_key_leftover_sync,
                 _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -805,6 +808,16 @@ def _phrase_for(check: Check) -> str:
         if "not been granted" in msg:
             return "I don't have Screen Recording permission"
         return "Screen Recording couldn't be checked"
+    if name == "cosyvoice":
+        lower = msg.lower()
+        if "not installed" in lower or "not importable" in lower:
+            return "CosyVoice isn't installed"
+        if any(bit in lower for bit in (
+            "not set", "not a directory", "not a file", "no cosyvoice",
+            "empty", "must be",
+        )):
+            return "CosyVoice isn't configured"
+        return "CosyVoice couldn't be checked"
     if name == "fish_api_key":
         return "I have no Fish Audio key"
     if name == "anthropic_key_leftover":

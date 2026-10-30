@@ -1,0 +1,12 @@
+# Optional. Not installed by `pip install -r requirements.txt`.
+#
+# The CosyVoice code is a git checkout (docs/cosyvoice.md), not a wheel in
+# this repo. Installing that checkout's own requirements.txt is the normal
+# path. This file lists what tts.py's inference imports if you need to add
+# them yourself. It does not download model weights.
+#
+# CPU is supported and slow (several seconds per sentence). CUDA is faster
+# on NVIDIA. MPS is best-effort on Apple Silicon.
+torch>=2.1
+torchaudio>=2.1
+numpy>=1.26
