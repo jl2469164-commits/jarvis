@@ -464,7 +464,7 @@ def test_the_openapi_console_can_be_turned_back_on_for_debugging(monkeypatch,
 
 
 def test_spending_the_users_tts_quota_is_not_a_get(env, monkeypatch):
-    """`/api/tts-test` calls Fish Audio, which costs the user's quota. As a
+    """`/api/tts-test` runs local synthesis, which is slow. As a
     GET it was reachable from any page with an <img> tag, in a loop, and a
     GET is the one method the Origin check cannot cover."""
     c, server, _ = env

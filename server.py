@@ -95,8 +95,7 @@ log = logging.getLogger("jarvis")
 # Config
 # ---------------------------------------------------------------------------
 
-# Voice is local CosyVoice (tts.py). FISH_* may still be written by the
-# unchanged settings panel; nothing on the voice path reads them.
+# Voice is local CosyVoice (tts.py). The settings panel writes COSYVOICE_*.
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -5322,7 +5321,7 @@ REPO_SENSITIVE_REFUSAL = ("That's a private file, sir — credentials and keys "
 # Containment and the sensitive-file wall are unchanged and get this for
 # free — every path still goes through `repo_read.resolve_within`, so
 # JARVIS's own `.env` is refused exactly as any other project's is. That is
-# not incidental: his .env holds the Fish API key.
+# not incidental: his .env holds API keys and local config.
 
 JARVIS_SELF_NAME = "JARVIS"
 
@@ -6705,8 +6704,8 @@ SETTABLE_ENV_KEYS = frozenset({
 # through `.env`, and into the brain — a paragraph of somebody's choosing
 # standing in the system prompt as JARVIS's own words.
 #
-# So two bounds, because the keys are two kinds of thing. A Fish Audio key is
-# an opaque token and needs room; a NAME is a name. Neither needs a thousand
+# So two bounds, because the keys are two kinds of thing. An opaque token
+# needs room; a NAME is a name. Neither needs a thousand
 # characters, and the name — the one that reaches the prompt — gets the
 # tighter one. Held against SETTABLE_ENV_KEYS itself by tests/test_bounds.py,
 # so a key added later is bounded the day it is added.
@@ -6827,18 +6826,20 @@ async def api_settings_keys(body: KeyUpdate):
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
     return {"success": True}
 
-@app.post("/api/settings/test-fish")
-async def api_test_fish(body: KeyTest):
-    """The settings panel still posts here. The body is ignored.
-
-    This checks local CosyVoice paths and imports. It does not load weights
-    and it does not call Fish Audio.
-    """
-    del body
+def _cosyvoice_test_body() -> dict:
+    """File and import check only. Does not load the weights."""
     ready = tts.readiness()
     if ready.status == tts.STATUS_OK:
         return {"valid": True, "detail": ready.message}
     return {"valid": False, "error": ready.message}
+
+
+@app.post("/api/settings/test-cosyvoice")
+async def api_test_cosyvoice(body: KeyTest):
+    """Settings → Test CosyVoice. The body is ignored."""
+    del body
+    return _cosyvoice_test_body()
+
 
 @app.get("/api/settings/status")
 async def api_settings_status():
@@ -6846,19 +6847,23 @@ async def api_settings_status():
     _, env_dict = _read_env()
     claude_installed = _shutil.which("claude") is not None
     voice_ready = tts.readiness().status == tts.STATUS_OK
+    device = env_dict.get("COSYVOICE_DEVICE", "").strip().lower() or "cpu"
     return {
         "claude_code_installed": claude_installed,
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            # settings.ts still reads fish_audio. It now means CosyVoice is ready.
-            "fish_audio": voice_ready,
-            "fish_voice_id": bool(
-                env_dict.get("COSYVOICE_PROMPT_WAV", "").strip()
-                or env_dict.get("COSYVOICE_SPEAKER", "").strip()
-            ),
             "cosyvoice": voice_ready,
             "user_name": env_dict.get("USER_NAME", ""),
+        },
+        "voice": {
+            "ready": voice_ready,
+            "model_dir": env_dict.get("COSYVOICE_MODEL_DIR", ""),
+            "repo": env_dict.get("COSYVOICE_REPO", ""),
+            "prompt_wav": env_dict.get("COSYVOICE_PROMPT_WAV", ""),
+            "prompt_text": env_dict.get("COSYVOICE_PROMPT_TEXT", ""),
+            "speaker": env_dict.get("COSYVOICE_SPEAKER", ""),
+            "device": device,
         },
     }
 

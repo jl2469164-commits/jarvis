@@ -24,8 +24,9 @@ When a user clones this repo and starts Claude Code, help them:
 3. Install local CosyVoice (see `docs/cosyvoice.md`): clone
    FunAudioLLM/CosyVoice, download CosyVoice2-0.5B outside git, and set
    `COSYVOICE_MODEL_DIR`, `COSYVOICE_PROMPT_WAV`, `COSYVOICE_PROMPT_TEXT`,
-   and `COSYVOICE_DEVICE` (`cpu`, `cuda`, or `mps`). CPU works and is slow.
-   `tts.py` does not call Fish Audio.
+   and    `COSYVOICE_DEVICE` (`cpu`, `cuda`, or `mps`). CPU works and is slow.
+   Mac download steps (where the ~2 GB weights go, prompt wav, Apple
+   Silicon vs Intel) are in `docs/cosyvoice.md`.
 4. Install Python dependencies: pip install -r requirements.txt
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
@@ -133,7 +134,7 @@ arbitrary LLM and file content, so everything goes through
 - `usage_store.py` — Tracks the subscription's five-hour / seven-day
   rate-limit usage (there is no spend to report — see brain.py)
 - `preflight.py` — First-run environment checks: `claude` CLI/login,
-  Accessibility, Fish key, cross-session steering
+  Accessibility, CosyVoice, cross-session steering
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
 - `actions.py` — System actions (Terminal, Chrome) via AppleScript

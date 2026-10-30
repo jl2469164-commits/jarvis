@@ -120,11 +120,15 @@ JARVIS goes silent — the reply shows up as text. That reads as "it's broken"
 to a new user. The install (checkout, weights, env) is `docs/cosyvoice.md`.
 
 `COSYVOICE_DEVICE=cpu` is the path that works without a GPU, including on a
-Mac. It is slow: several seconds per sentence. `cuda` is what upstream
-expects on NVIDIA. `mps` is best-effort; a failed op means switch to `cpu`.
+Mac. It is slow: several seconds per sentence. `cuda` is for NVIDIA.
+`mps` is best-effort on Apple Silicon; a failed op means switch back to
+`cpu` and restart. Intel Macs stay on `cpu`.
 
-`FISH_API_KEY` is not read. The settings panel still has Fish fields because
-the frontend was left as it was. Preflight check name is `cosyvoice`.
+The settings panel is Settings → Voice (CosyVoice). Test CosyVoice checks
+the folder and `import cosyvoice`. It does not download weights. A Mac user
+who needs the clone path, the 2 GB download, `afconvert`, and where to put
+the files should follow `docs/cosyvoice.md` and not a shorter paraphrase.
+Preflight check name is `cosyvoice`.
 
 ## Connecting a service: one file, and it is not the one you'd guess
 

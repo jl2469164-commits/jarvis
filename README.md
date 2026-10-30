@@ -79,9 +79,10 @@ subscription's two windows is gone. Fictional sample data.*
 **His voice is local [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)**
 (CosyVoice2 when the model folder has `cosyvoice2.yaml`). `tts.py` returns
 one WAV per sentence; the browser plays it with the player it already has.
-There is no Fish Audio call. Without `COSYVOICE_MODEL_DIR` and a prompt wav
-(or a speaker id) he goes silent and the reply shows up as text. CPU works
-and is slow — several seconds per sentence. Setup is `docs/cosyvoice.md`.
+Without `COSYVOICE_MODEL_DIR` and a prompt wav (or a speaker id) he goes
+silent and the reply shows up as text. CPU works and is slow — several
+seconds per sentence. On a Mac, follow the download steps in
+`docs/cosyvoice.md` (about 2 GB, outside this repo, `cpu` first).
 
 ## What he does
 
@@ -359,7 +360,7 @@ invariants hold throughout it:
 | `dialog.py` | Presses one key in the Terminal tab that owns a session |
 | `jarvis_memory.py` | Memory as a folder of Markdown files, not a database |
 | `jarvis_home/CLAUDE.md` | JARVIS's persona and rules — the file to edit to change who he is |
-| `preflight.py` | First-run checks: CLI version, login, Accessibility, Fish key |
+| `preflight.py` | First-run checks: CLI version, login, Accessibility, CosyVoice |
 | `data_paths.py` | The single source of truth for where JARVIS writes |
 | `frontend/src/voice.ts` | Web Speech API, audio playback |
 | `frontend/src/orb.ts` | The Three.js particle orb |
