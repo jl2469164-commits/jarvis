@@ -35,42 +35,40 @@ else looks fine, the first question is "did the URL's port change" — check
 `chrome://settings/content/microphone` for the exact origin in use, not just
 "is the mic allowed somewhere."
 
-## This fork's default preflight is XAI + Aider
+## Default preflight checks the Cursor CLI
 
-`preflight.run_checks()` does not include `claude_cli` or `claude_login`.
-It fails when `XAI_API_KEY` is missing (the `.env.example` placeholder
-`your-xai-api-key-here` counts as missing), when `aider` is not on PATH, or
-when none of the Aider provider keys in `preflight._AIDER_MODEL_KEY_VARS`
-is set. Pass `include_legacy_claude=True` to run the Claude checks as well.
+`preflight.run_checks()` does not include `claude_cli` or `claude_login`,
+and it does not require `XAI_API_KEY` or any Aider provider key. It fails
+when neither `agent` nor `cursor-agent` is on PATH (or `JARVIS_CURSOR_AGENT`
+is set to something that is not executable). The smoke is `--help`, then
+`--version` if help fails. Pass `include_legacy_claude=True` to run the old
+Claude checks as well.
 
-`brain.py` and `run_executor.py` still spawn `claude -p`. A machine can pass
-the new preflight and still have no voice brain, or fail preflight while
-Claude itself would have worked. `grok_tools.as_openai_functions()` is the
-OpenAI-style export of `jarvis_mcp.TOOL_SPECS` for `api.x.ai`; nothing in
-the voice loop calls it yet. Read `_ASYNC_CHECKS` / `_SYNC_CHECKS` in
-`preflight.py` rather than assuming the subscription gate is what startup runs.
+`brain.py` and `run_executor.py` spawn that CLI through `cursor_cli.py`.
+Read `_ASYNC_CHECKS` / `_SYNC_CHECKS` in `preflight.py` rather than assuming
+a subscription or API-key gate is what startup runs.
 
-## JARVIS's running brain is still the Claude Code subscription — never an API key
+## The brain uses the Cursor CLI login — never an API key
 
-The voice brain (`brain.py`) is one long-lived `claude -p` process
-authenticated by the user's `claude` login, not the Anthropic API.
-`claude_env.child_env()` strips every `ANTHROPIC_*` variable (and
-`CLAUDE_CODE_*`, `CLAUDECODE`) from the environment handed to every spawned
-Claude Code child — brain and run pipeline alike — for one reason: the CLI
-silently *prefers* an inherited `ANTHROPIC_API_KEY` over the logged-in
-session, without saying so (`claude auth status` still reports
-`loggedIn: true` while billing moves to the key). So:
+The voice brain is a long-lived supervisor (`cursor_cli supervise`) that
+runs `agent -p` once per turn. Construction runs are one `agent -p` each.
+Authentication is the user's existing `agent` login. `cursor_cli.child_env()`
+strips `CURSOR_API_KEY`, `XAI_API_KEY`, every `ANTHROPIC_*` variable, and
+`CLAUDE_CODE_*` / `CLAUDECODE` from the child. So:
 
-- Putting `ANTHROPIC_API_KEY` in `.env` does not authenticate the voice brain.
-  Claude children have it scrubbed, and preflight warns
-  (`anthropic_key_leftover`). Keep that one name only if Aider should call
-  Anthropic — it is in `_AIDER_MODEL_KEY_VARS`. Any other `ANTHROPIC_*`
-  variable is a leftover and should come out.
-- The processes that still spawn `claude` need Claude Code installed
-  (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or newer) and `claude`
-  logged in with a subscription. Default preflight does not check that.
+- Do not put `CURSOR_API_KEY`, `XAI_API_KEY`, or `ANTHROPIC_API_KEY` in
+  `.env` for JARVIS. Preflight warns on leftover `ANTHROPIC_*`
+  (`anthropic_key_leftover`).
+- Install the Cursor CLI and run `agent login`. If the binary is not named
+  `agent` or `cursor-agent`, set `JARVIS_CURSOR_AGENT` to its path.
 
 ## An expired login sounds like a JARVIS problem, not an auth problem
+
+The running brain is the Cursor CLI (`agent login`), not an API key. If that
+login is missing, preflight's `cursor_cli` check fails and a warm-up turn
+errors instead of hanging the server. The notes below are the older Claude
+Code failure, and they apply when `include_legacy_claude=True` is how you
+are checking — the spoken symptom is the same shape.
 
 When the CLI's OAuth session can't refresh, JARVIS's voice brain fails and
 says only **"my language systems are down"** — nothing more diagnostic than

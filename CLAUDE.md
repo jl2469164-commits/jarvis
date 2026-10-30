@@ -11,16 +11,10 @@ by hitting them live, and this walkthrough assumes them.
 
 When a user clones this repo and starts Claude Code, help them:
 1. Copy .env.example to .env (placeholders only — never commit a real `.env`)
-2. Set what default preflight checks, and install what the processes still spawn:
-   - `XAI_API_KEY` from https://console.x.ai/ (Grok voice-brain path)
-   - `aider` on PATH, plus one provider key listed in `.env.example`
-     (`OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`,
-     `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `AZURE_API_KEY`, `COHERE_API_KEY`,
-     or `ANTHROPIC_API_KEY`)
-   - Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-     newer) and `claude` login. `brain.py` and `run_executor.py` still spawn
-     `claude -p`. `claude_cli` / `claude_login` are not in default
-     `run_checks()`; pass `include_legacy_claude=True` to run them.
+2. Install the Cursor CLI and log in with `agent login`. The voice brain and
+   every construction run spawn `agent` or `cursor-agent` (override with
+   `JARVIS_CURSOR_AGENT`). No xAI key and no Aider key. Default preflight
+   checks that the binary answers `--help` or `--version`.
 3. Install local CosyVoice (see `docs/cosyvoice.md`): clone
    FunAudioLLM/CosyVoice, download CosyVoice2-0.5B outside git, and set
    `COSYVOICE_MODEL_DIR`, `COSYVOICE_PROMPT_WAV`, `COSYVOICE_PROMPT_TEXT`,
@@ -53,12 +47,11 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Backend**: FastAPI + Python (server.py, ~5800 lines)
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
-- **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
-  the user's subscription; no Anthropic API calls on the voice path.
-  Default preflight on this fork expects `XAI_API_KEY` and Aider instead
-  (`preflight.run_checks`); `grok_tools.py` exports `jarvis_mcp.TOOL_SPECS`
-  as OpenAI-style functions for `api.x.ai`. Switching `brain.py` and
-  `run_executor.py` off `claude -p` is not done yet.
+- **AI**: the Cursor CLI (`agent` / `cursor-agent`) on the user's existing
+  `agent` login. `brain.py` keeps a long-lived supervisor that runs
+  `agent -p` per turn; `run_executor.py` runs `agent -p` once per build.
+  Shared argv and env live in `cursor_cli.py`. No xAI API key, no Aider key,
+  and no `CURSOR_API_KEY` is set or required.
 - **TTS**: local CosyVoice (CosyVoice2 when the weights include
   `cosyvoice2.yaml`); one WAV per sentence, played by the existing browser
   audio path. CPU is slow. See `docs/cosyvoice.md`.
@@ -101,8 +94,8 @@ arbitrary LLM and file content, so everything goes through
 
 ## Key Files
 - `server.py` — Main server, WebSocket handler, HTTP API, action system
-- `brain.py` — The voice brain: one long-lived `claude -p` process on the
-  user's Claude subscription, fed over stdin as stream-json
+- `brain.py` — The voice brain: a long-lived supervisor over the Cursor CLI
+- `cursor_cli.py` — Shared `agent` argv, child env, and the brain's supervisor
 - `jarvis_mcp.py` — Stdio MCP server exposing JARVIS's tools to the brain;
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
@@ -113,7 +106,7 @@ arbitrary LLM and file content, so everything goes through
 - `frontend/src/main.ts` — Frontend state machine
 - `frontend/src/dashboard/` — The `/dashboard` run monitor (vanilla TS)
 - `run_store.py` — SQLite `runs` / `run_events` tables, six-value status enum
-- `run_executor.py` — Spawns `claude -p --output-format stream-json` and drives
+- `run_executor.py` — Spawns `agent -p --output-format stream-json` and drives
   each run to a terminal state, streaming its events into the store
 - `stream_parser.py` — Pure parsing of the stream-json output (no I/O)
 - `builds.py` — The spec/brief/plan pipeline behind real, phased,
@@ -165,25 +158,17 @@ live convention: `builds.py` and `specs.py` create them **inside the projects
 JARVIS builds**. It is only this repository's own copies that are gone.
 
 ## Environment Variables
-- `XAI_API_KEY` — required by default preflight for the Grok voice-brain
-  path (`https://console.x.ai/`). The documented placeholder
-  `your-xai-api-key-here` counts as unset. `brain.py` does not call the API
-  yet; `grok_tools.as_openai_functions()` is the tool list that call will send.
-- Aider — default preflight also requires `aider` on PATH (`aider_installed`)
-  and one provider key (`aider_model_key`): `OPENAI_API_KEY`,
-  `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`,
-  `GOOGLE_API_KEY`, `AZURE_API_KEY`, `COHERE_API_KEY`, or
-  `ANTHROPIC_API_KEY`. `run_executor.py` still spawns `claude -p`.
-- `ANTHROPIC_API_KEY` — not read by the voice brain, and the `anthropic` SDK
-  is not a dependency. `claude_env.child_env()` scrubs every `ANTHROPIC_*`
-  variable from every spawned Claude Code child so the CLI can never bill an
-  API key instead. `preflight.py`'s `anthropic_key_leftover` check warns if
-  one is set. The same name is also accepted as an Aider provider key; keep
-  it only when Aider should call Anthropic. Legacy Claude CLI/login checks
-  stay in `preflight.py` and run only with
-  `run_checks(include_legacy_claude=True)`.
+- `JARVIS_CURSOR_AGENT` (optional) — path or name of the Cursor CLI. Default
+  is `agent`, then `cursor-agent`, on PATH. Not a secret.
+- `ANTHROPIC_API_KEY` — not read by the voice brain or the run executor, and
+  the `anthropic` SDK is not a dependency. `cursor_cli.child_env()` scrubs
+  every `ANTHROPIC_*` variable, plus `XAI_API_KEY` and `CURSOR_API_KEY`, from
+  every spawned child. `preflight.py`'s `anthropic_key_leftover` check warns
+  if an `ANTHROPIC_*` variable is set. Legacy Claude CLI/login checks stay in
+  `preflight.py` and run only with `run_checks(include_legacy_claude=True)`.
 - `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the brain,
-  always passed explicitly as `--model` to `claude -p` today
+  always passed explicitly as `agent -p --model`
+- `JARVIS_RUN_MODEL` (optional, default `sonnet`) — model for construction runs
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
@@ -200,9 +185,8 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`
   (`data_paths.py`). Set it to run an isolated instance without touching live
   data — the test suite gives every test a fresh one this way.
-- `JARVIS_SKIP_PERMISSIONS` (optional) — Defaults to true; passes
-  `--dangerously-skip-permissions` to spawned runs, which have no TTY to
-  answer a permission prompt
+- `JARVIS_SKIP_PERMISSIONS` (optional) — Defaults to true; passes `--force`
+  to spawned Cursor CLI runs, which have no TTY to answer a permission prompt
 - `WEATHER_LOCATION_LABEL` / `WEATHER_LATITUDE` / `WEATHER_LONGITUDE` /
   `WEATHER_UNIT` (all optional) — override the auto-detected (public-IP)
   weather location and units

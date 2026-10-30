@@ -344,7 +344,18 @@ async def test_store_failure_still_reaches_terminal_state(env):
     ex = mod.RunExecutor(_ExplodingStore(store), claude_path=claude,
                          grace_sec=5)
     run_id = await ex.spawn("do a thing", "proj", str(tmp), "api")
-    await _await_status(store, run_id, store.RunStatus.RUNNING)
+    # The child prints its fixture immediately, so the store write can fail
+    # and the run can already be terminal before the first poll. Either
+    # observation is the same path: it did start, and the assertions below
+    # hold the terminal state.
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        run = store.get_run(run_id)
+        if run and run["status"] in (store.RunStatus.RUNNING, *store.RunStatus.TERMINAL):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        raise AssertionError(f"run never started; last={store.get_run(run_id)}")
     pid = store.get_run(run_id)["pid"]
 
     run = await ex.wait_for(run_id, timeout=15)
@@ -500,47 +511,51 @@ async def test_timeout_keeps_the_collected_stderr(env, tmp_path):
     assert "ENOSPC: no space left on device" in run["error"]
 
 
-# -- the four `_command` construction tests: the highest-value tests here --
-# Nothing else in the suite exercises how the command line is built, and two
-# of its flags are load-bearing: `--dangerously-skip-permissions` (without it
-# a spawned run has no TTY to answer a permission prompt and hangs forever)
-# and `--fork-session` alongside `--resume` (CLI 2.1.251 rejects
-# `--session-id` with `--resume` otherwise, so every retry would fail).
+# -- the `_command` construction tests: the highest-value tests here --
+# Nothing else in the suite exercises how the command line is built. Two
+# flags are load-bearing for the Cursor CLI: `--force` (without it a run
+# blocks on a permission prompt it has no TTY to answer) and `--trust`
+# (without it a headless run in an untrusted workspace fails or hangs).
 
 def test_command_includes_skip_permissions_by_default(env):
     store, mod, tmp = env
-    ex = mod.RunExecutor(store, claude_path="claude")
+    ex = mod.RunExecutor(store, claude_path="agent")
     cmd = ex._command("run-1", None)
-    assert "--dangerously-skip-permissions" in cmd, (
-        "without this flag a run blocks on a permission prompt it has no TTY "
+    assert cmd[0] == "agent"
+    assert "-p" in cmd
+    assert cmd[cmd.index("--output-format") + 1] == "stream-json"
+    assert "--trust" in cmd
+    assert "--force" in cmd, (
+        "without --force a run blocks on a permission prompt it has no TTY "
         "to answer, and hangs forever")
 
 
-def test_command_sets_session_id(env):
+def test_command_does_not_pass_the_run_id_as_a_cursor_session(env):
     store, mod, tmp = env
-    ex = mod.RunExecutor(store, claude_path="claude")
+    ex = mod.RunExecutor(store, claude_path="agent")
     cmd = ex._command("run-1", None)
-    assert cmd[cmd.index("--session-id") + 1] == "run-1"
+    assert "--session-id" not in cmd
     assert "--resume" not in cmd
     assert "--fork-session" not in cmd
 
 
-def test_command_forks_when_resuming(env):
+def test_command_resumes_a_cursor_chat(env):
     store, mod, tmp = env
-    ex = mod.RunExecutor(store, claude_path="claude")
-    cmd = ex._command("run-2", "run-1")
-    assert cmd[cmd.index("--resume") + 1] == "run-1"
-    assert "--fork-session" in cmd, (
-        "CLI 2.1.251 rejects --session-id with --resume unless --fork-session "
-        "is also passed")
+    ex = mod.RunExecutor(store, claude_path="agent")
+    cmd = ex._command("run-2", "chat-1")
+    assert cmd[cmd.index("--resume") + 1] == "chat-1"
+    assert "--fork-session" not in cmd
+    assert "--session-id" not in cmd
 
 
 def test_command_respects_skip_permissions_opt_out(env, monkeypatch):
     store, mod, tmp = env
     monkeypatch.setenv("JARVIS_SKIP_PERMISSIONS", "false")
     importlib.reload(mod)
-    ex = mod.RunExecutor(store, claude_path="claude")
-    assert "--dangerously-skip-permissions" not in ex._command("run-1", None)
+    ex = mod.RunExecutor(store, claude_path="agent")
+    cmd = ex._command("run-1", None)
+    assert "--force" not in cmd
+    assert "--trust" in cmd
 
 
 # -- explicit model selection ------------------------------------------------
@@ -770,6 +785,8 @@ async def test_a_run_never_inherits_api_credentials(env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "ws-123")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "the-server's-own")
     monkeypatch.setenv("CLAUDECODE", "1")
+    monkeypatch.setenv("XAI_API_KEY", "xai-should-never-reach-a-run")
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-should-never-reach-a-run")
 
     claude = _script(
         tmp, "env_dumping_claude.py",
@@ -786,7 +803,7 @@ async def test_a_run_never_inherits_api_credentials(env, monkeypatch):
     child = json.loads(marker.read_text())
     leaked = [k for k in child
               if k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
-              or k == "CLAUDECODE"]
+              or k in {"CLAUDECODE", "XAI_API_KEY", "CURSOR_API_KEY"}]
     assert leaked == [], (
         f"a spawned run inherited {leaked} — it will be billed to the API key "
         f"instead of the user's subscription")
@@ -825,10 +842,12 @@ def test_the_scrub_is_shared_with_the_brain_not_copied():
     thing again."""
     import brain
     import claude_env
+    import cursor_cli
     import run_executor as mod
 
     assert brain.SCRUBBED_ENV_PREFIXES is claude_env.SCRUBBED_ENV_PREFIXES
-    assert brain.Brain.child_env() == claude_env.child_env()
+    assert brain.Brain.child_env() == cursor_cli.child_env()
+    assert mod.cursor_cli.child_env() == cursor_cli.child_env()
     assert mod.claude_env is claude_env
 
 

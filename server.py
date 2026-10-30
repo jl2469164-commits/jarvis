@@ -3,7 +3,7 @@ JARVIS Server — Voice AI + Development Orchestration
 
 Handles:
 1. WebSocket voice interface (browser audio <-> LLM <-> TTS)
-2. Claude Code task manager (spawn/manage claude -p subprocesses)
+2. Cursor CLI task manager (spawn/manage `agent -p` subprocesses)
 3. Project awareness (scan Desktop for git repos)
 4. REST API for task management
 """
@@ -32,8 +32,9 @@ from pathlib import Path
 # writer forbade three characters — "\n", "\r", "\0" — and `str.splitlines()`
 # splits on ten, so `{"user_name": "Tony\x0bJARVIS_CLAUDE_PATH=/tmp/evil"}`
 # came back 200 and `_read_env()` then reported JARVIS_CLAUDE_PATH=/tmp/evil.
-# That is the binary the brain is spawned from, and /api/restart is one call
-# away. Extending the blocklist to ten characters would have left the same
+# A path override such as JARVIS_CURSOR_AGENT is the binary the brain is
+# spawned from, and /api/restart is one call away. Extending the blocklist
+# to ten characters would have left the same
 # shape of bug for the next separator; deriving the writer's rule from the
 # reader's parser cannot.
 def _parse_env_lines(text: str) -> list[tuple[str, str]]:
@@ -6669,11 +6670,11 @@ async def voice_handler(ws: WebSocket):
 # The only keys any HTTP route may write into .env.
 #
 # The gate is here, at the one function that writes, rather than on each
-# endpoint: `JARVIS_CLAUDE_PATH` is the binary the brain spawns and
-# `JARVIS_PROJECT_ROOTS` is what counts as "inside a project" for every
-# containment check, so an endpoint that can write an arbitrary key is an
-# endpoint that can replace JARVIS's brain with /tmp/evil and then ask for
-# a restart.
+# endpoint: `JARVIS_CURSOR_AGENT` is the binary the brain and the run
+# executor spawn, and `JARVIS_PROJECT_ROOTS` is what counts as "inside a
+# project" for every containment check, so an endpoint that can write an
+# arbitrary key is an endpoint that can replace JARVIS's brain with
+# /tmp/evil and then ask for a restart.
 SETTABLE_ENV_KEYS = frozenset({
     # The settings panel still posts these. tts.py does not read them.
     "FISH_API_KEY", "FISH_VOICE_ID",

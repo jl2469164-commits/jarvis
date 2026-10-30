@@ -1,4 +1,8 @@
-"""OpenAI-style function tools derived from jarvis_mcp.TOOL_SPECS (for Grok API).
+"""OpenAI-style function tools derived from jarvis_mcp.TOOL_SPECS.
+
+Not used by the voice brain or the run executor. Those spawn the Cursor CLI
+(`cursor_cli.py`) and do not call api.x.ai. This export stays so the MCP
+tool list can be compared with an OpenAI-shaped snapshot.
 
 `docs/grok_function_tools.json` is the committed export. Regenerate it with
 `python grok_tools.py` after TOOL_SPECS changes; tests/test_grok_tools.py

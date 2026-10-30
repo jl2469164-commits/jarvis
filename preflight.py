@@ -1,14 +1,13 @@
 """
 JARVIS preflight -- first-run environment checks.
 
-Startup checks for the Grok-API brain + Aider construction path: `XAI_API_KEY`,
-`aider` on PATH and a provider model key, plus local CosyVoice, Accessibility,
-Screen Recording, and (still reported) Claude leftover / cross-session hints.
-Legacy `_check_claude_*` helpers remain in this file for tests and for
-`run_checks(include_legacy_claude=True)`, but they are not part of the
-default `run_checks()`. `brain.py` and `run_executor.py` still spawn
-`claude -p` until that follow-up; this module only observes the environment
-the follow-up will need.
+Startup checks for the Cursor CLI brain and construction path: `agent` or
+`cursor-agent` on PATH (or `JARVIS_CURSOR_AGENT`), plus local CosyVoice,
+Accessibility, Screen Recording, and (still reported) Claude leftover /
+cross-session hints. No xAI key and no Aider key are required. Legacy
+`_check_claude_*` helpers remain for tests and for
+`run_checks(include_legacy_claude=True)`; they are not part of the default
+`run_checks()`.
 
 This module only *observes*. Nothing here writes a file, changes a setting,
 or grants a permission -- see `_check_cross_session_inbound_sync`'s
@@ -458,13 +457,11 @@ def _check_cosyvoice_sync() -> Check:
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
-    """Report ANTHROPIC_* variables. The Grok path does not read them.
+    """Report ANTHROPIC_* variables. The Cursor CLI path does not read them.
 
-    `claude_env.child_env()` still scrubs every ANTHROPIC_* variable from any
-    Claude Code child, because that CLI prefers an inherited key over a
-    subscription login. `ANTHROPIC_API_KEY` is also one of the names
-    `_check_aider_model_key_sync` accepts, so this stays a warning: keep that
-    one key only when Aider should call Anthropic.
+    `cursor_cli.child_env()` still scrubs every ANTHROPIC_* variable from
+    spawned children, because a leftover key used to redirect Claude Code
+    onto API billing. The voice brain and the run executor do not use it.
     """
     leftover = sorted(k for k in os.environ if k.startswith("ANTHROPIC_"))
     if not leftover:
@@ -477,13 +474,10 @@ def _check_anthropic_key_leftover_sync() -> Check:
         name="anthropic_key_leftover",
         status=STATUS_WARN,
         message=(
-            f"{', '.join(leftover)} set in the environment. The Grok voice path "
-            "does not read these, and Claude children still have them scrubbed."
+            f"{', '.join(leftover)} set in the environment. The Cursor CLI "
+            "path does not read these, and children still have them scrubbed."
         ),
-        remedy=(
-            "Keep ANTHROPIC_API_KEY only if Aider should call Anthropic. "
-            "Remove any other ANTHROPIC_* variables from .env."
-        ),
+        remedy="Remove ANTHROPIC_* variables from .env. JARVIS does not use an Anthropic API key.",
     )
 
 
@@ -629,10 +623,12 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
     return True, str(path)
 
 
-# ── Grok / Aider brain+build preflight (default gate) ────────────────────
+# ── Cursor CLI (default gate) ────────────────────────────────────────────
 
-# `.env.example` uses placeholders of the form your-...-here. Copying the
-# template must not look like a configured key.
+# `.env.example` uses placeholders of the form your-...-here. Copying a
+# template must not look like a configured secret. Nothing in the default
+# gate requires a secret; the pattern stays so a future placeholder cannot
+# sneak through a full-value check unnoticed.
 _PLACEHOLDER_SECRET = re.compile(r"^your-.+-here$")
 
 
@@ -644,79 +640,62 @@ def _configured_secret(name: str) -> bool:
     return True
 
 
-def _check_xai_api_key_sync() -> Check:
-    """XAI_API_KEY must be set for a Grok-API brain path."""
-    if _configured_secret("XAI_API_KEY"):
-        return Check(name="xai_api_key", status=STATUS_OK, message="XAI_API_KEY is set.")
-    return Check(
-        name="xai_api_key",
-        status=STATUS_FAIL,
-        message="XAI_API_KEY is not set.",
-        remedy="Create an API key at https://console.x.ai/ and set XAI_API_KEY in .env.",
-    )
+def _cursor_binary() -> tuple[str | None, str | None]:
+    """`(path, problem)`. `problem` is set when the override or PATH lookup fails."""
+    explicit = os.environ.get("JARVIS_CURSOR_AGENT", "").strip()
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit, None
+        found = shutil.which(explicit)
+        if found:
+            return found, None
+        return None, (
+            f"JARVIS_CURSOR_AGENT={explicit!r} is not an executable."
+        )
+    found = shutil.which("agent") or shutil.which("cursor-agent")
+    if not found:
+        return None, "Neither `agent` nor `cursor-agent` is on PATH."
+    return found, None
 
 
-# Env vars Aider commonly uses for model providers (any one is enough).
-# XAI_API_KEY is the voice-brain key and is checked on its own; Aider reads
-# a provider key from this list (OpenAI-compatible xAI setups use
-# OPENAI_API_KEY plus a base URL, not XAI_API_KEY).
-_AIDER_MODEL_KEY_VARS = (
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "GEMINI_API_KEY",
-    "GOOGLE_API_KEY",
-    "ANTHROPIC_API_KEY",  # Aider can still use Anthropic; Claude children scrub it
-    "AZURE_API_KEY",
-    "COHERE_API_KEY",
-)
+async def _check_cursor_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
+    """The Cursor CLI is on PATH and answers a non-destructive `--help` or `--version`.
 
-
-async def _check_aider_installed(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
-    """Aider must be on PATH for the construction / run_executor path."""
-    aider = shutil.which("aider")
-    if not aider:
+    Does not log in, does not send a prompt, and does not require an API key.
+    A binary that exists but whose smoke command fails is a warning: the
+    install is there, and the remedy is to run it by hand.
+    """
+    binary, problem = _cursor_binary()
+    if not binary:
         return Check(
-            name="aider_installed",
+            name="cursor_cli",
             status=STATUS_FAIL,
-            message="`aider` is not on PATH.",
-            remedy="Install Aider (e.g. `pipx install aider-chat`) and ensure it is on PATH.",
+            message=problem or "Cursor CLI is not on PATH.",
+            remedy=(
+                "Install the Cursor CLI (https://cursor.com/docs/cli/overview) "
+                "so `agent` or `cursor-agent` is on PATH, then run `agent login`. "
+                "Set JARVIS_CURSOR_AGENT if the binary lives somewhere else. "
+                "No API key is required."
+            ),
         )
-    rc, stdout, stderr = await _run_subprocess(aider, "--version", timeout=timeout)
-    ver = (stdout or stderr or "").strip().splitlines()[:1]
-    ver_s = ver[0] if ver else f"exit {rc}"
+    rc, stdout, stderr = await _run_subprocess(binary, "--help", timeout=timeout)
     if rc != 0:
-        return Check(
-            name="aider_installed",
-            status=STATUS_WARN,
-            message=f"`aider` found at {aider} but `--version` failed: {ver_s}",
-            remedy="Reinstall Aider or fix the binary on PATH.",
-        )
+        rc, stdout, stderr = await _run_subprocess(binary, "--version", timeout=timeout)
+        if rc != 0:
+            detail = (stderr or stdout).strip().splitlines()[:1]
+            detail_s = detail[0] if detail else f"exit {rc}"
+            return Check(
+                name="cursor_cli",
+                status=STATUS_WARN,
+                message=f"`{binary}` did not answer `--help` or `--version`: {detail_s}",
+                remedy="Run `agent --help` yourself and fix the binary on PATH.",
+            )
+    summary = (stdout or stderr or "").strip().splitlines()[:1]
+    summary_s = summary[0] if summary else binary
     return Check(
-        name="aider_installed",
+        name="cursor_cli",
         status=STATUS_OK,
-        message=f"Aider available ({ver_s}).",
-    )
-
-
-def _check_aider_model_key_sync() -> Check:
-    """At least one common Aider provider API key should be present."""
-    present = [k for k in _AIDER_MODEL_KEY_VARS if _configured_secret(k)]
-    if present:
-        return Check(
-            name="aider_model_key",
-            status=STATUS_OK,
-            message=f"Aider model key(s) set: {', '.join(present)}.",
-        )
-    return Check(
-        name="aider_model_key",
-        status=STATUS_FAIL,
-        message="No Aider provider API key found in the environment.",
-        remedy=(
-            "Set a key Aider can use for your chosen model, e.g. OPENAI_API_KEY, "
-            "OPENROUTER_API_KEY, DEEPSEEK_API_KEY, or GEMINI_API_KEY in .env "
-            "(see https://aider.chat/docs/llms.html)."
-        ),
+        message=f"Cursor CLI available ({summary_s}).",
     )
 
 
@@ -724,9 +703,8 @@ def _check_aider_model_key_sync() -> Check:
 
 # Opt-in only. Default startup must not require the Claude CLI.
 _LEGACY_CLAUDE_CHECKS = (_check_claude_cli, _check_claude_login)
-_ASYNC_CHECKS = (_check_aider_installed, _check_accessibility)
-_SYNC_CHECKS = (_check_xai_api_key_sync, _check_aider_model_key_sync,
-                _check_cosyvoice_sync, _check_anthropic_key_leftover_sync,
+_ASYNC_CHECKS = (_check_cursor_cli, _check_accessibility)
+_SYNC_CHECKS = (_check_cosyvoice_sync, _check_anthropic_key_leftover_sync,
                 _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -763,8 +741,7 @@ async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT,
     `warn` results after `timeout` seconds, not a hung or crashed server.
 
     `include_legacy_claude` adds `claude_cli` and `claude_login`. Default
-    startup leaves them off: the Grok/Aider gate is `xai_api_key`,
-    `aider_installed`, and `aider_model_key`.
+    startup leaves them off: the gate that matters is `cursor_cli`.
     """
     async_checks = list(_ASYNC_CHECKS)
     if include_legacy_claude:
@@ -782,14 +759,10 @@ async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT,
 # the specific failure (e.g. "isn't installed" vs. "needs updating").
 def _phrase_for(check: Check) -> str:
     name, msg = check.name, check.message
-    if name == "xai_api_key":
-        return "there's no XAI API key"
-    if name == "aider_installed":
-        if "not on PATH" in msg:
-            return "Aider isn't installed"
-        return "Aider couldn't be checked"
-    if name == "aider_model_key":
-        return "there's no Aider model API key"
+    if name == "cursor_cli":
+        if "PATH" in msg or "not an executable" in msg:
+            return "Cursor CLI isn't installed"
+        return "Cursor CLI couldn't be checked"
     if name == "claude_cli":
         if "not on PATH" in msg:
             return "Claude Code isn't installed"

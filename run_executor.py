@@ -1,4 +1,10 @@
-"""Spawns Claude Code runs and records everything they do.
+"""Spawns Cursor CLI runs and records everything they do.
+
+Each run is one headless `agent -p` (see `cursor_cli.py`): the prompt is
+written to stdin, stream-json comes back on stdout, and stderr is drained
+so a chatty child cannot fill the pipe and stall. A missing binary, a
+non-zero exit, a timeout, or a silence past the idle bound all end in a
+terminal row — the server is not crashed by a failed run.
 
 Invariant: every state transition is written to the store *before* it is
 published to subscribers. The WebSocket is a cache-invalidation hint, never
@@ -15,12 +21,11 @@ import asyncio
 import logging
 import math
 import os
-import shlex
-import shutil
 import time
 from typing import Callable
 
 import claude_env
+import cursor_cli
 import stream_parser
 
 log = logging.getLogger("jarvis.run_executor")
@@ -207,7 +212,9 @@ class RunExecutor:
                  idle_sec: float | None = None,
                  poll_sec: float = _READ_POLL_SEC):
         self._store = store
-        self._claude_path = claude_path or shutil.which("claude") or "claude"
+        # `claude_path` is the historical name of the binary override tests
+        # pass in. It is the Cursor CLI (or a stand-in script), not Claude.
+        self._claude_path = claude_path or cursor_cli.resolve_executable()
         self._max_concurrent = max_concurrent
         self._grace_sec = grace_sec
         self._eof_grace_sec = eof_grace_sec
@@ -441,22 +448,17 @@ class RunExecutor:
 
     def _command(self, run_id: str, resume_from: str | None,
                 model: str | None = None) -> list[str]:
-        base = shlex.split(self._claude_path)
-        cmd = base + ["-p", "--output-format", "stream-json", "--verbose",
-                      "--session-id", run_id]
-        if resume_from:
-            # Verified against CLI 2.1.251: --session-id is rejected alongside
-            # --resume unless --fork-session is also passed. Forking is also the
-            # semantics we want — the retry inherits context but owns its own id.
-            cmd += ["--resume", resume_from, "--fork-session"]
-        # Always explicit, never the CLI's own default — same reasoning as
-        # brain.py always passing --model.
-        cmd += ["--model", self._resolve_model(model)]
-        if _SKIP_PERMISSIONS:
-            # Matches the five existing call sites. Without this a run blocks on
-            # a permission prompt it has no TTY to answer, and hangs forever.
-            cmd.append("--dangerously-skip-permissions")
-        return cmd
+        # `run_id` is JARVIS's row id. Cursor mints its own chat id, so it
+        # is not passed as `--session-id`. `--resume` is the previous CLI
+        # chat id when the caller has one. `--force` keeps an unattended
+        # edit from blocking on a permission prompt.
+        _ = run_id
+        return cursor_cli.print_argv(
+            self._claude_path,
+            model=self._resolve_model(model),
+            force=_SKIP_PERMISSIONS,
+            resume=resume_from,
+        )
 
     async def _publish_run_updated(self, run_id: str) -> None:
         """Announce a field change on a still-running run.
@@ -588,7 +590,7 @@ class RunExecutor:
                     # every run onto paid API billing without a word. Same
                     # scrub the brain has had since milestone 1; see
                     # claude_env.py.
-                    env=claude_env.child_env(),
+                    env=cursor_cli.child_env(),
                     # asyncio's default 64 KiB StreamReader line limit is far
                     # smaller than a stream-json line can legitimately be
                     # (a big tool result, a long assistant message, a large
@@ -597,7 +599,7 @@ class RunExecutor:
                 )
             except (FileNotFoundError, NotADirectoryError, PermissionError) as e:
                 await self._finish(run_id, self._store.RunStatus.FAILED,
-                                   error=f"could not start claude: {e}")
+                                   error=f"could not start cursor agent: {e}")
                 return
 
             self._procs[run_id] = proc
@@ -647,7 +649,7 @@ class RunExecutor:
                 # TIMED_OUT rather than FAILED: it used up a time budget,
                 # which is what a timeout is. The budget it used up is named
                 # in the error so the two are never confused in the UI.
-                error = (f"claude produced no output for {self._idle_sec}s "
+                error = (f"cursor agent produced no output for {self._idle_sec}s "
                          f"and was still running; killed")
                 if stderr:
                     error = f"{error}\n{stderr}"
@@ -691,7 +693,7 @@ class RunExecutor:
                 # and we killed it, so its exit status says nothing. FAILED
                 # rather than TIMED_OUT: it did not use up a time budget, it
                 # refused to exit.
-                error = (f"claude closed stdout but did not exit within "
+                error = (f"cursor agent closed stdout but did not exit within "
                          f"{self._eof_grace_sec}s; killed")
                 if stderr:
                     error = f"{error}\n{stderr}"
@@ -706,7 +708,7 @@ class RunExecutor:
                 # run that wrote files and then errored looks like work done.
                 # A run whose own final event says it errored is FAILED.
                 error = (run["result_text"] or stderr
-                         or "claude reported is_error on its result event")
+                         or "cursor agent reported is_error on its result event")
                 await self._finish(run_id, self._store.RunStatus.FAILED,
                                    exit_code=0, error=error[:_STDERR_CHARS])
             elif proc.returncode == 0:

@@ -447,6 +447,18 @@ EXEMPT = {
         "conversation's roster entry. They reach a log line and the state "
         "callback the frontend reads; the only text this composes for the "
         "model is the assistant delta, which is the model's own output"),
+    "cursor_cli._run_one": (
+        "`event.get(\"session_id\")` is the Cursor CLI's own chat id for "
+        "THIS turn, copied onto the stream the brain already parses. The "
+        "f-strings are an OSError or the child's stderr, emitted as an "
+        "error result for that same process — not a roster header"),
+    "cursor_cli.supervise": (
+        "`opts[\"model\"]` is the `--model` flag this process was started "
+        "with, not a run row. The prompt it builds is `launch_prompt()` "
+        "(already walled) plus the user's own turn, handed to `agent -p`"),
+    "cursor_cli._install_mcp": (
+        "`Path.cwd()` is this process's working directory, not a session's "
+        "`cwd` field. The only f-string is an OSError written to stderr"),
     "brain._spawn_locked": (
         "the same: the `session_id` is the one the CLI just gave this "
         "process for itself, and it goes to `log.info`. A log is not the "
