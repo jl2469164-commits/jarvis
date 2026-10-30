@@ -21,8 +21,11 @@ When a user clones this repo and starts Claude Code, help them:
      newer) and `claude` login. `brain.py` and `run_executor.py` still spawn
      `claude -p`. `claude_cli` / `claude_login` are not in default
      `run_checks()`; pass `include_legacy_claude=True` to run them.
-3. Get a Fish Audio API key from fish.audio (required — there is no fallback
-   voice)
+3. Install local CosyVoice (see `docs/cosyvoice.md`): clone
+   FunAudioLLM/CosyVoice, download CosyVoice2-0.5B outside git, and set
+   `COSYVOICE_MODEL_DIR`, `COSYVOICE_PROMPT_WAV`, `COSYVOICE_PROMPT_TEXT`,
+   and `COSYVOICE_DEVICE` (`cpu`, `cuda`, or `mps`). CPU works and is slow.
+   `tts.py` does not call Fish Audio.
 4. Install Python dependencies: pip install -r requirements.txt
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
@@ -55,7 +58,9 @@ this presents as "the UI is up but nothing works" rather than as an error.
   (`preflight.run_checks`); `grok_tools.py` exports `jarvis_mcp.TOOL_SPECS`
   as OpenAI-style functions for `api.x.ai`. Switching `brain.py` and
   `run_executor.py` off `claude -p` is not done yet.
-- **TTS**: Fish Audio with JARVIS voice model
+- **TTS**: local CosyVoice (CosyVoice2 when the weights include
+  `cosyvoice2.yaml`); one WAV per sentence, played by the existing browser
+  audio path. CPU is slow. See `docs/cosyvoice.md`.
 - **System**: AppleScript for Terminal and Chrome integration
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
   `run_store.py` (SQLite) + `run_executor.py`, surfaced at `/api/runs`,
@@ -101,7 +106,7 @@ arbitrary LLM and file content, so everything goes through
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
-- `tts.py` — Fish Audio synthesis, one request per sentence chunk
+- `tts.py` — local CosyVoice synthesis, one WAV per sentence chunk
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
@@ -182,8 +187,13 @@ JARVIS builds**. It is only this repository's own copies that are gone.
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
   rejection is not enough with a given microphone
-- `FISH_API_KEY` (required) — Fish Audio TTS
-- `FISH_VOICE_ID` (optional) — Voice model ID
+- `COSYVOICE_MODEL_DIR` (required) — local CosyVoice or CosyVoice2 weights.
+  `COSYVOICE_PROMPT_WAV` + `COSYVOICE_PROMPT_TEXT` clone a voice (preferred
+  for CosyVoice2). `COSYVOICE_SPEAKER` is the SFT alternative.
+  `COSYVOICE_DEVICE` is `cpu` (slow, the Mac-safe default), `cuda`, or
+  `mps` (best-effort). `COSYVOICE_REPO` is the FunAudioLLM/CosyVoice
+  checkout so `import cosyvoice` resolves. Details: `docs/cosyvoice.md`.
+  `FISH_API_KEY` / `FISH_VOICE_ID` are deprecated and unread by `tts.py`.
 - `USER_NAME` (optional) — Your name for JARVIS to use
 - `JARVIS_DATA_DIR` (optional) — Where JARVIS writes everything: the SQLite
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`

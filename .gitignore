@@ -24,6 +24,10 @@ data/.jarvis_output.txt
 cert.pem
 key.pem
 
+# CosyVoice checkout and weights (multi-GB). See docs/cosyvoice.md.
+/CosyVoice/
+/pretrained_models/
+
 # Build
 dist/
 .vite/

@@ -76,11 +76,12 @@ limit.](docs/images/dashboard-usage.png)
 *So the number that matters is not a dollar figure — it is how much of your
 subscription's two windows is gone. Fictional sample data.*
 
-**The one thing you pay for is [Fish Audio](https://fish.audio/)**, which
-gives JARVIS his voice. Be aware there is no fallback: `tts.py` returns
-nothing without `FISH_API_KEY`, so JARVIS goes silent and his replies appear
-as text in the browser instead. If you would rather use a different TTS, that
-is a small, well-isolated file to replace — see *Make it yours* below.
+**His voice is local [CosyVoice](https://github.com/FunAudioLLM/CosyVoice)**
+(CosyVoice2 when the model folder has `cosyvoice2.yaml`). `tts.py` returns
+one WAV per sentence; the browser plays it with the player it already has.
+There is no Fish Audio call. Without `COSYVOICE_MODEL_DIR` and a prompt wav
+(or a speaker id) he goes silent and the reply shows up as text. CPU works
+and is slow — several seconds per sentence. Setup is `docs/cosyvoice.md`.
 
 ## What he does
 
@@ -155,7 +156,10 @@ stuck is the CLI's own words, not a guess. Fictional sample data.*
   Those two checks are opt-in (`include_legacy_claude=True`), not part of
   default preflight.
 - **Python 3.11+** and **Node.js 18+**.
-- **A Fish Audio API key.** Required; there is no fallback voice.
+- **Local CosyVoice.** A checkout of FunAudioLLM/CosyVoice plus the
+  CosyVoice2-0.5B weights (not in git), a short prompt wav, and
+  `COSYVOICE_DEVICE=cpu`, `cuda`, or `mps`. CPU is slow. See
+  `docs/cosyvoice.md`.
 
 ## Setup
 
@@ -172,15 +176,17 @@ cd frontend && npm install && cd ..
 ```
 
 **Fill in the `.env`.** `.env.example` documents the lot; the short version is
-the keys default preflight asks for, plus Fish Audio:
+the keys default preflight asks for, including local CosyVoice:
 
 ```env
-FISH_API_KEY=...            # required, no fallback
-XAI_API_KEY=...             # required by default preflight (Grok path)
-# OPENAI_API_KEY=...        # one Aider provider key; see .env.example
-# JARVIS_BRAIN_MODEL=sonnet # optional: the brain's model (claude -p today)
-# FISH_VOICE_ID=...         # optional: a different voice
-# USER_NAME=Tony            # optional: what he calls you
+COSYVOICE_MODEL_DIR=/path/to/CosyVoice2-0.5B   # required, local weights
+COSYVOICE_PROMPT_WAV=/path/to/prompt.wav       # voice to clone
+COSYVOICE_PROMPT_TEXT=The words in that wav.
+COSYVOICE_DEVICE=cpu            # cpu (slow), cuda, or mps
+XAI_API_KEY=...                 # required by default preflight (Grok path)
+# OPENAI_API_KEY=...            # one Aider provider key; see .env.example
+# JARVIS_BRAIN_MODEL=sonnet     # optional: the brain's model (claude -p today)
+# USER_NAME=Tony                # optional: what he calls you
 ```
 
 **Generate the certificates.** These are not optional:
@@ -289,7 +295,7 @@ Microphone → Chrome Web Speech API → WebSocket → FastAPI (server.py)
                                                       │
                     ┌─────────────────────────────────┼──────────────────────────────┐
                     ▼                                 ▼                              ▼
-        speech.py → Fish Audio → speaker    MCP tools (jarvis_mcp.py       session_watch.py
+        speech.py → CosyVoice → speaker     MCP tools (jarvis_mcp.py       session_watch.py
                                              → POST /internal/tool)     (every Claude Code
                                                       │                  session on the machine)
                                                       ▼
@@ -329,7 +335,7 @@ invariants hold throughout it:
 | Frontend | Vite + TypeScript + Three.js (voice UI), vanilla TS (dashboard) |
 | Communication | WebSocket — JSON messages, base64 MP3 audio |
 | Brain | One long-lived `claude -p` process, Sonnet by default, on your subscription |
-| Voice | Fish Audio, one request per sentence |
+| Voice | Local CosyVoice, one WAV per sentence |
 | System | AppleScript — Terminal, Chrome, notifications, screenshots |
 | Storage | SQLite for runs and usage; plain Markdown for memory |
 
@@ -342,7 +348,7 @@ invariants hold throughout it:
 | `claude_env.py` | The environment every spawned child gets, including the `ANTHROPIC_*` scrub |
 | `jarvis_mcp.py` | Stdio MCP server exposing JARVIS's tools to the brain |
 | `speech.py` | Sentence splitting, echo rejection, barge-in, and the queue of everything JARVIS says |
-| `tts.py` | Fish Audio synthesis — the whole voice, in one small file |
+| `tts.py` | Local CosyVoice synthesis — one WAV per sentence |
 | `builds.py` | Spec, brief and plan: the pipeline behind a real multi-hour build |
 | `specs.py` | The review surface — reading a design back by numbered section, and approving it |
 | `run_store.py` | SQLite `runs` / `run_events`, and the six-value status enum |
@@ -428,8 +434,8 @@ it and bend it to what you do. The seams are deliberately obvious:
   data directory on first run; edit that copy and it is never overwritten, or
   edit the template and it ships to a fresh install. If you want something
   other than a British butler, this is the only file you need to touch.
-- **His voice** is `tts.py`: one HTTP call, sixty-odd lines. Swap in a
-  different provider, or a local model, without touching anything else.
+- **His voice** is `tts.py`: local CosyVoice, one WAV per sentence. The
+  browser player is unchanged. Install steps are in `docs/cosyvoice.md`.
 - **His tools** are the `TOOL_HANDLERS` table in `server.py`, exposed to the
   brain through `jarvis_mcp.py` and gated by an allowlist in `brain.py`.
   Adding one means writing a handler and naming it in those two places.
@@ -479,8 +485,8 @@ visit [ethanplus.ai](https://ethanplus.ai) for inquiries. See
 ## Credits
 
 Built by [Ethan](https://ethanplus.ai). Runs on
-[Claude Code](https://claude.com/claude-code) and
-[Fish Audio](https://fish.audio).
+[Claude Code](https://claude.com/claude-code). The voice is local
+[CosyVoice](https://github.com/FunAudioLLM/CosyVoice).
 
 Inspired by the AI that started it all — Tony Stark's JARVIS.
 
