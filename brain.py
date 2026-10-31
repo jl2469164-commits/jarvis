@@ -1,10 +1,14 @@
 """
-brain.py — JARVIS's brain: one long-lived `claude -p` process on the user's
-Claude subscription, fed over stdin as stream-json.
+brain.py — JARVIS's brain.
 
-No Anthropic API. Lean flags (no user hooks, no user MCP servers, coding tools
-disallowed) keep a turn at ~13k context tokens with sub-second first tokens
-once warm. Every state transition is observable through on_state().
+The production child is the Cursor CLI (`agent` / `cursor-agent`), one
+headless turn per user message, kept behind a long-lived supervisor so this
+process can still stream, time out, and restart. See `cursor_cli.py`. There
+is no xAI HTTP call and no API key: the CLI uses the existing `agent` login.
+
+`BrainConfig.claude_path` is a session-process override for tests. That
+stand-in speaks stream-json on stdin directly (the historical Claude Code
+shape). It is not a second production backend.
 """
 from __future__ import annotations
 
@@ -14,7 +18,7 @@ import logging
 import os
 import re
 import shlex
-import shutil
+import signal
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -22,12 +26,13 @@ from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 import claude_env
+import cursor_cli
 import usage_store
 
 log = logging.getLogger("jarvis.brain")
 
 # The brain runs on the user's Claude subscription — never on an API key. Any of
-# these in the server's environment (they come from .env for Fish/other features)
+# these in the server's environment (they come from .env)
 # would make the CLI authenticate with the key instead of the login.
 #
 # Re-exported from claude_env, which is where the scrub now lives: the run
@@ -290,6 +295,9 @@ class BrainConfig:
     model: str = "sonnet"
     effort: str = "low"
     claude_path: Optional[str] = None
+    # Cursor CLI binary override (`JARVIS_CURSOR_AGENT`). Not a session
+    # stand-in: the supervisor still owns the stdin protocol and spawns this.
+    agent_path: Optional[str] = None
     turn_timeout: float = 90.0
     warmup_timeout: float = 45.0
     max_restarts: int = 3
@@ -310,7 +318,7 @@ class BrainConfig:
             home=home,
             model=os.getenv("JARVIS_BRAIN_MODEL", "sonnet"),
             effort=os.getenv("JARVIS_BRAIN_EFFORT", "low"),
-            claude_path=os.getenv("JARVIS_CLAUDE_PATH") or None,
+            agent_path=os.getenv("JARVIS_CURSOR_AGENT") or None,
             turn_timeout=float(os.getenv("JARVIS_BRAIN_TURN_TIMEOUT", "90")),
             context_budget=int(os.getenv("JARVIS_BRAIN_CONTEXT_BUDGET", "120000")),
             user_name=os.getenv("USER_NAME", ""),
@@ -396,7 +404,14 @@ class _Turn:
 class Brain:
     def __init__(self, config: BrainConfig):
         self.config = config
-        self._claude = config.claude_path or shutil.which("claude") or "claude"
+        # Set only for a test (or other) stand-in that speaks stream-json
+        # itself. Production leaves this empty and `command()` launches
+        # `cursor_cli supervise`, which spawns `agent`.
+        # None in production: `command()` launches the Cursor supervisor.
+        # A test stand-in (or a mid-session path change) sets this to the
+        # stream-json process to spawn instead.
+        self._claude = config.claude_path or None
+        self._session_leaders: set[int] = set()
         self._proc: Optional[asyncio.subprocess.Process] = None
         self._reader: Optional[asyncio.Task] = None
         self._turn_lock = asyncio.Lock()
@@ -741,8 +756,25 @@ class Brain:
         return base
 
     def command(self) -> list[str]:
+        if not self._claude:
+            c = self.config
+            return cursor_cli.supervise_argv(
+                model=c.model,
+                system_prompt=self.launch_prompt(),
+                agent=c.agent_path,
+                mcp_config=str(c.mcp_config) if c.mcp_config else None,
+                extra=list(c.extra_args),
+            )
+        return self._session_command()
+
+    def _session_command(self) -> list[str]:
+        """Argv for an injected stream-json stand-in (`claude_path`).
+
+        Production does not use this. The flags match the historical session
+        protocol the test double reads; they are not passed to `agent`.
+        """
         c = self.config
-        cmd = shlex.split(self._claude) + [
+        cmd = shlex.split(self._claude or "") + [
             "-p", "--input-format", "stream-json", "--output-format", "stream-json",
             "--verbose", "--include-partial-messages",
             "--model", c.model, "--effort", c.effort, "--name", "jarvis",
@@ -759,7 +791,7 @@ class Brain:
 
     @staticmethod
     def child_env() -> dict[str, str]:
-        return claude_env.child_env()
+        return cursor_cli.child_env()
 
     # ── lifecycle ──────────────────────────────────────────────────────
     async def start(self) -> bool:
@@ -805,10 +837,17 @@ class Brain:
         self._detach_and_kill(self._proc)
         self.generation += 1
         try:
+            native = not self._claude
             proc = await asyncio.create_subprocess_exec(
                 *self.command(), cwd=str(self.config.home), env=self.child_env(),
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # The supervisor's `agent` child must die with it. A new
+                # session makes this pid the group leader so `_kill` can
+                # signal the whole group. Stand-ins have no grandchildren
+                # and stay in the parent's group, which the tests reap
+                # with a plain kill.
+                start_new_session=native,
                 # Without this the brain's readers keep asyncio's 64 KiB line
                 # limit, and the recovery below turns an oversized reply into a
                 # SKIPPED one: JARVIS goes silent instead of answering. The
@@ -817,7 +856,7 @@ class Brain:
             )
         except OSError as e:  # includes FileNotFoundError / PermissionError
             self.generation -= 1
-            log.error(f"brain: cannot start {self._claude!r}: {e}")
+            log.error(f"brain: cannot start {self.command()[:3]!r}: {e}")
             self._proc = None
             if rotating:
                 return False      # the caller still has a brain that works
@@ -825,6 +864,8 @@ class Brain:
             await self._emit("failed", reason=str(e))
             return False
         self._proc = proc
+        if native and proc.pid:
+            self._session_leaders.add(proc.pid)
         self._reader = asyncio.create_task(self._read_stdout(proc))
         self._stderr_task = asyncio.create_task(self._drain_stderr(proc))
         run_warmup = self._turn_locked if rotating else self._turn
@@ -887,8 +928,13 @@ class Brain:
                 except Exception as e:
                     log.warning(f"brain: reader task ended with {e}")
 
-    @staticmethod
-    def _kill(proc: asyncio.subprocess.Process) -> None:
+    def _kill(self, proc: asyncio.subprocess.Process) -> None:
+        pid = getattr(proc, "pid", None)
+        if pid and pid in self._session_leaders:
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
         try:
             proc.kill()
         except ProcessLookupError:
@@ -1187,7 +1233,7 @@ class Brain:
                 # e.g. an API auth error: the CLI reports subtype "success" with
                 # is_error true and puts the message in an assistant text block.
                 t.error = (ev.get("result") if isinstance(ev.get("result"), str) and ev.get("result")
-                           else " ".join(t.assistant_text) or f"claude reported {ev.get('subtype')}")
+                           else " ".join(t.assistant_text) or f"agent reported {ev.get('subtype')}")
                 log.error(f"brain: turn failed: {t.error[:300]}")
                 t.finish("error")
             else:

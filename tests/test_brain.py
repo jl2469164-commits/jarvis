@@ -94,9 +94,28 @@ def test_child_env_scrubs_claude_code_vars(monkeypatch):
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "x")
     monkeypatch.setenv("CLAUDECODE", "1")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/keep/me")
+    monkeypatch.setenv("XAI_API_KEY", "xai-should-not-pass")
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-should-not-pass")
     env = brain.Brain.child_env()
     assert "CLAUDE_CODE_SESSION_ID" not in env and "CLAUDECODE" not in env
+    assert "XAI_API_KEY" not in env and "CURSOR_API_KEY" not in env
     assert env["CLAUDE_CONFIG_DIR"] == "/keep/me"
+
+
+def test_default_command_invokes_the_cursor_cli(tmp_path, monkeypatch):
+    import brain
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    b = brain.Brain(brain.BrainConfig(home=tmp_path / "jarvis", model="opus",
+                                      agent_path="/opt/bin/agent"))
+    cmd = b.command()
+    assert cmd[0] == sys.executable
+    assert cmd[1].endswith("cursor_cli.py")
+    assert cmd[2] == "supervise"
+    assert cmd[cmd.index("--model") + 1] == "opus"
+    assert cmd[cmd.index("--agent") + 1] == "/opt/bin/agent"
+    assert "--append-system-prompt" in cmd
+    prompt = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "brain generation" in prompt
 
 
 @pytest.mark.asyncio
@@ -486,8 +505,11 @@ def test_child_env_never_carries_api_credentials(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")   # would move the brain off the login
     monkeypatch.setenv("ANTHROPIC_MODEL", "something")
     monkeypatch.setenv("FISH_API_KEY", "keep")
+    monkeypatch.setenv("XAI_API_KEY", "xai-should-not-pass")
+    monkeypatch.setenv("CURSOR_API_KEY", "cursor-should-not-pass")
     env = brain.Brain.child_env()
     assert not any(k.startswith("ANTHROPIC_") for k in env)
+    assert "XAI_API_KEY" not in env and "CURSOR_API_KEY" not in env
     assert env["FISH_API_KEY"] == "keep"
 
 

@@ -10,18 +10,25 @@ key, what an expired login sounds like, Accessibility) that were only learned
 by hitting them live, and this walkthrough assumes them.
 
 When a user clones this repo and starts Claude Code, help them:
-1. Copy .env.example to .env
-2. Install Claude Code (`npm install -g @anthropic-ai/claude-code`, 2.1.224 or
-   newer) and log in with `claude` — JARVIS's brain runs on your Claude
-   subscription, not on an API key
-3. Get a Fish Audio API key from fish.audio (required — there is no fallback
-   voice)
+1. Copy .env.example to .env (placeholders only — never commit a real `.env`)
+2. Install the Cursor CLI and log in with `agent login`. The voice brain and
+   every construction run spawn `agent` or `cursor-agent` (override with
+   `JARVIS_CURSOR_AGENT`). No xAI key and no Aider key. Default preflight
+   checks that the binary answers `--help` or `--version`.
+3. Install local CosyVoice (see `docs/cosyvoice.md`): clone
+   FunAudioLLM/CosyVoice, download CosyVoice2-0.5B outside git, and set
+   `COSYVOICE_MODEL_DIR`, `COSYVOICE_PROMPT_WAV`, `COSYVOICE_PROMPT_TEXT`,
+   and    `COSYVOICE_DEVICE` (`cpu`, `cuda`, or `mps`). CPU works and is slow.
+   Mac download steps (where the ~2 GB weights go, prompt wav, Apple
+   Silicon vs Intel) are in `docs/cosyvoice.md`.
 4. Install Python dependencies: pip install -r requirements.txt
 5. Install the Playwright browser: python -m playwright install chromium
    (`read_page` / `look_at_page` need it)
 6. Install frontend dependencies: cd frontend && npm install
 7. Generate the SSL certs — see below, they are NOT optional:
-   `openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'`
+   `./scripts/generate_https_certs.sh`
+   (same openssl invocation: `cert.pem` + `key.pem`, CN=localhost, 365 days;
+   both names are gitignored)
 8. Run the backend: python server.py --host 127.0.0.1
 9. Run the frontend: cd frontend && npm run dev
 10. Open Chrome (mic only works in Chrome) to http://localhost:5173
@@ -40,9 +47,14 @@ this presents as "the UI is up but nothing works" rather than as an error.
 - **Backend**: FastAPI + Python (server.py, ~5800 lines)
 - **Frontend**: Vite + TypeScript + Three.js (audio-reactive orb)
 - **Communication**: WebSocket (JSON messages + binary audio)
-- **AI**: a long-lived Claude Code process (`brain.py`, Sonnet by default) on
-  the user's subscription; no Anthropic API calls on the voice path
-- **TTS**: Fish Audio with JARVIS voice model
+- **AI**: the Cursor CLI (`agent` / `cursor-agent`) on the user's existing
+  `agent` login. `brain.py` keeps a long-lived supervisor that runs
+  `agent -p` per turn; `run_executor.py` runs `agent -p` once per build.
+  Shared argv and env live in `cursor_cli.py`. No xAI API key, no Aider key,
+  and no `CURSOR_API_KEY` is set or required.
+- **TTS**: local CosyVoice (CosyVoice2 when the weights include
+  `cosyvoice2.yaml`); one WAV per sentence, played by the existing browser
+  audio path. CPU is slow. See `docs/cosyvoice.md`.
 - **System**: AppleScript for Terminal and Chrome integration
 - **Runs**: every Claude Code execution goes through one recorded pipeline —
   `run_store.py` (SQLite) + `run_executor.py`, surfaced at `/api/runs`,
@@ -82,19 +94,19 @@ arbitrary LLM and file content, so everything goes through
 
 ## Key Files
 - `server.py` — Main server, WebSocket handler, HTTP API, action system
-- `brain.py` — The voice brain: one long-lived `claude -p` process on the
-  user's Claude subscription, fed over stdin as stream-json
+- `brain.py` — The voice brain: a long-lived supervisor over the Cursor CLI
+- `cursor_cli.py` — Shared `agent` argv, child env, and the brain's supervisor
 - `jarvis_mcp.py` — Stdio MCP server exposing JARVIS's tools to the brain;
   forwards `tools/call` to `POST /internal/tool`
 - `speech.py` — Sentence splitting and the scheduler that owns every
   utterance JARVIS speaks
-- `tts.py` — Fish Audio synthesis, one request per sentence chunk
+- `tts.py` — local CosyVoice synthesis, one WAV per sentence chunk
 - `frontend/src/orb.ts` — Three.js particle orb visualization
 - `frontend/src/voice.ts` — Web Speech API + audio playback
 - `frontend/src/main.ts` — Frontend state machine
 - `frontend/src/dashboard/` — The `/dashboard` run monitor (vanilla TS)
 - `run_store.py` — SQLite `runs` / `run_events` tables, six-value status enum
-- `run_executor.py` — Spawns `claude -p --output-format stream-json` and drives
+- `run_executor.py` — Spawns `agent -p --output-format stream-json` and drives
   each run to a terminal state, streaming its events into the store
 - `stream_parser.py` — Pure parsing of the stream-json output (no I/O)
 - `builds.py` — The spec/brief/plan pipeline behind real, phased,
@@ -115,7 +127,7 @@ arbitrary LLM and file content, so everything goes through
 - `usage_store.py` — Tracks the subscription's five-hour / seven-day
   rate-limit usage (there is no spend to report — see brain.py)
 - `preflight.py` — First-run environment checks: `claude` CLI/login,
-  Accessibility, Fish key, cross-session steering
+  Accessibility, CosyVoice, cross-session steering
 - `claude_env.py` — The environment every spawned Claude Code child gets,
   including the `ANTHROPIC_*` scrub
 - `actions.py` — System actions (Terminal, Chrome) via AppleScript
@@ -146,30 +158,35 @@ live convention: `builds.py` and `specs.py` create them **inside the projects
 JARVIS builds**. It is only this repository's own copies that are gone.
 
 ## Environment Variables
-- `ANTHROPIC_API_KEY` — **read by nothing.** Not asked for in setup, not read
-  by any module, and the `anthropic` SDK is not a dependency: JARVIS's brain
-  and every spawned run go through your Claude Code subscription login.
-  `claude_env.child_env()` scrubs every `ANTHROPIC_*` variable from every
-  spawned Claude Code child (brain and run pipeline alike) so the CLI can
-  never bill an API key instead, and `preflight.py`'s `anthropic_key_leftover`
-  check warns you if one is sitting in your `.env` — that is the only place
-  the name appears in live code.
+- `JARVIS_CURSOR_AGENT` (optional) — path or name of the Cursor CLI. Default
+  is `agent`, then `cursor-agent`, on PATH. Not a secret.
+- `ANTHROPIC_API_KEY` — not read by the voice brain or the run executor, and
+  the `anthropic` SDK is not a dependency. `cursor_cli.child_env()` scrubs
+  every `ANTHROPIC_*` variable, plus `XAI_API_KEY` and `CURSOR_API_KEY`, from
+  every spawned child. `preflight.py`'s `anthropic_key_leftover` check warns
+  if an `ANTHROPIC_*` variable is set. Legacy Claude CLI/login checks stay in
+  `preflight.py` and run only with `run_checks(include_legacy_claude=True)`.
 - `JARVIS_BRAIN_MODEL` (optional, default `sonnet`) — model for the brain,
-  always passed explicitly as `--model`
+  always passed explicitly as `agent -p --model`
+- `JARVIS_RUN_MODEL` (optional, default `sonnet`) — model for construction runs
 - `JARVIS_BRAIN_AUTOSTART` (optional, default `1`) — `0` builds the brain but
   never spawns it (every test sets this)
 - `JARVIS_MUTE_MIC_DURING_SPEECH` (optional, default false) — fallback if echo
   rejection is not enough with a given microphone
-- `FISH_API_KEY` (required) — Fish Audio TTS
-- `FISH_VOICE_ID` (optional) — Voice model ID
+- `COSYVOICE_MODEL_DIR` (required) — local CosyVoice or CosyVoice2 weights.
+  `COSYVOICE_PROMPT_WAV` + `COSYVOICE_PROMPT_TEXT` clone a voice (preferred
+  for CosyVoice2). `COSYVOICE_SPEAKER` is the SFT alternative.
+  `COSYVOICE_DEVICE` is `cpu` (slow, the Mac-safe default), `cuda`, or
+  `mps` (best-effort). `COSYVOICE_REPO` is the FunAudioLLM/CosyVoice
+  checkout so `import cosyvoice` resolves. Details: `docs/cosyvoice.md`.
+  `FISH_API_KEY` / `FISH_VOICE_ID` are deprecated and unread by `tts.py`.
 - `USER_NAME` (optional) — Your name for JARVIS to use
 - `JARVIS_DATA_DIR` (optional) — Where JARVIS writes everything: the SQLite
   database, memory Markdown, usage.json, the tool token. Defaults to `data/`
   (`data_paths.py`). Set it to run an isolated instance without touching live
   data — the test suite gives every test a fresh one this way.
-- `JARVIS_SKIP_PERMISSIONS` (optional) — Defaults to true; passes
-  `--dangerously-skip-permissions` to spawned runs, which have no TTY to
-  answer a permission prompt
+- `JARVIS_SKIP_PERMISSIONS` (optional) — Defaults to true; passes `--force`
+  to spawned Cursor CLI runs, which have no TTY to answer a permission prompt
 - `WEATHER_LOCATION_LABEL` / `WEATHER_LATITUDE` / `WEATHER_LONGITUDE` /
   `WEATHER_UNIT` (all optional) — override the auto-detected (public-IP)
   weather location and units

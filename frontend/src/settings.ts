@@ -9,15 +9,25 @@
 // Types
 // ---------------------------------------------------------------------------
 
+interface VoiceConfig {
+  ready: boolean;
+  model_dir: string;
+  repo: string;
+  prompt_wav: string;
+  prompt_text: string;
+  speaker: string;
+  device: string;
+}
+
 interface StatusResponse {
   claude_code_installed: boolean;
   server_port: number;
   uptime_seconds: number;
   env_keys_set: {
-    fish_audio: boolean;
-    fish_voice_id: boolean;
+    cosyvoice: boolean;
     user_name: string;
   };
+  voice?: VoiceConfig;
 }
 
 interface PreferencesResponse {
@@ -32,7 +42,7 @@ interface PreferencesResponse {
 let panelEl: HTMLElement | null = null;
 let isOpen = false;
 let isFirstTimeSetup = false;
-let setupStep = 0; // 0=fish, 1=name, 2=done
+let setupStep = 0; // 0=voice, 1=name, 2=done
 
 // ---------------------------------------------------------------------------
 // API helpers
@@ -71,32 +81,53 @@ function buildPanelHTML(): string {
 
       <div class="settings-body">
 
-        <!-- API Keys -->
-        <section class="settings-section" id="section-api-keys">
-          <h3>API Keys</h3>
+        <!-- Local voice -->
+        <section class="settings-section" id="section-voice">
+          <h3>Voice (CosyVoice)</h3>
+          <p class="settings-hint">Local model. On a Mac, use cpu. It is slow. Weights are not downloaded from this page. See docs/cosyvoice.md.</p>
 
           <div class="settings-field">
-            <label>Fish Audio API Key</label>
-            <div class="settings-input-row">
-              <input type="password" id="input-fish-key" placeholder="Fish Audio key..." />
-              <button class="settings-btn" id="btn-test-fish">Test</button>
-              <span class="status-dot" id="status-fish"></span>
-            </div>
+            <label>Model directory</label>
+            <input type="text" id="input-cosy-model" placeholder="/Users/you/models/CosyVoice2-0.5B" />
           </div>
 
           <div class="settings-field">
-            <label>Fish Voice ID</label>
-            <div class="settings-input-row">
-              <input type="text" id="input-fish-voice-id" placeholder="612b878b113047d9a770c069c8b4fdfe" />
-              <button class="settings-btn" id="btn-save-voice-id">Save</button>
-            </div>
+            <label>CosyVoice checkout</label>
+            <input type="text" id="input-cosy-repo" placeholder="/Users/you/src/CosyVoice" />
+          </div>
+
+          <div class="settings-field">
+            <label>Prompt wav</label>
+            <input type="text" id="input-cosy-prompt-wav" placeholder="/Users/you/models/jarvis-prompt.wav" />
+          </div>
+
+          <div class="settings-field">
+            <label>Prompt transcript</label>
+            <input type="text" id="input-cosy-prompt-text" placeholder="The words spoken in that wav" />
+          </div>
+
+          <div class="settings-field">
+            <label>Speaker id (optional, instead of a prompt wav)</label>
+            <input type="text" id="input-cosy-speaker" placeholder="leave blank for zero-shot" />
+          </div>
+
+          <div class="settings-field">
+            <label>Device</label>
+            <select id="input-cosy-device">
+              <option value="cpu">cpu (Mac-safe, slow)</option>
+              <option value="mps">mps (Apple Silicon, best-effort)</option>
+              <option value="cuda">cuda (NVIDIA)</option>
+            </select>
           </div>
 
           <div class="settings-actions">
-            <button class="settings-btn primary" id="btn-save-keys">Save Keys</button>
+            <button class="settings-btn primary" id="btn-save-voice" type="button">Save voice</button>
+            <button class="settings-btn" id="btn-test-cosyvoice" type="button">Test CosyVoice</button>
+            <span class="status-dot" id="status-cosyvoice"></span>
           </div>
+          <p class="settings-hint" id="voice-test-result"></p>
           <p class="settings-restart-notice" id="keys-restart-notice" style="display:none">
-            Saved. Restart the server (menu &rarr; Restart Server) for this to take effect.
+            Saved. Restart the server (menu &rarr; Restart Server) before speaking.
           </p>
         </section>
 
@@ -188,8 +219,8 @@ async function loadStatus() {
     const serverDetail = document.getElementById("status-server-detail");
     if (serverDetail) serverDetail.textContent = `port ${status.server_port} | up ${formatUptime(status.uptime_seconds)}`;
 
-    // API key status dots
-    setDotStatus("status-fish", status.env_keys_set.fish_audio ? "green" : "red");
+    setDotStatus("status-cosyvoice", status.env_keys_set.cosyvoice ? "green" : "red");
+    fillVoiceFields(status.voice);
 
     // System info
     const portEl = document.getElementById("sysinfo-port");
@@ -200,13 +231,13 @@ async function loadStatus() {
     return status;
   } catch (e) {
     console.error("[settings] failed to load status:", e);
-    // EVERY dot, not just the server's. The CLI and Fish dots are drawn from
+    // EVERY dot, not just the server's. The CLI and voice dots are drawn from
     // fields of the answer that never arrived, so leaving them green states
     // as fact something this call failed to find out. "off" is the absence
     // of a reading, which is what we have.
     setDotStatus("status-server", "red");
     setDotStatus("status-claude-cli", "off");
-    setDotStatus("status-fish", "off");
+    setDotStatus("status-cosyvoice", "off");
     const serverDetail = document.getElementById("status-server-detail");
     if (serverDetail) serverDetail.textContent = "no answer from the server";
     for (const id of ["sysinfo-port", "sysinfo-uptime"]) {
@@ -229,43 +260,81 @@ async function loadPreferences() {
   }
 }
 
+function fieldValue(id: string): string {
+  const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+  return el ? el.value.trim() : "";
+}
+
+function fillVoiceFields(voice: VoiceConfig | undefined) {
+  if (!voice) return;
+  const set = (id: string, value: string) => {
+    const el = document.getElementById(id) as HTMLInputElement | HTMLSelectElement | null;
+    if (el) el.value = value || "";
+  };
+  set("input-cosy-model", voice.model_dir);
+  set("input-cosy-repo", voice.repo);
+  set("input-cosy-prompt-wav", voice.prompt_wav);
+  set("input-cosy-prompt-text", voice.prompt_text);
+  set("input-cosy-speaker", voice.speaker);
+  set("input-cosy-device", voice.device || "cpu");
+}
+
+function showVoiceNote(text: string) {
+  const note = document.getElementById("voice-test-result");
+  if (note) note.textContent = text;
+}
+
+async function saveVoiceKey(name: string, value: string): Promise<string | null> {
+  const res = await fetch("/api/settings/keys", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ key_name: name, key_value: value }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.success === false) {
+    return typeof body.error === "string" ? body.error : `Could not save ${name}`;
+  }
+  return null;
+}
+
 function wireEvents() {
   // Close
   document.getElementById("settings-close")?.addEventListener("click", closeSettings);
   document.getElementById("settings-backdrop")?.addEventListener("click", closeSettings);
 
-  // Save keys
-  document.getElementById("btn-save-keys")?.addEventListener("click", async () => {
-    const fishKey = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
-
-    let savedAny = false;
-    if (fishKey) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_API_KEY", key_value: fishKey });
-      savedAny = true;
+  document.getElementById("btn-save-voice")?.addEventListener("click", async () => {
+    const pairs: Array<[string, string]> = [
+      ["COSYVOICE_MODEL_DIR", fieldValue("input-cosy-model")],
+      ["COSYVOICE_REPO", fieldValue("input-cosy-repo")],
+      ["COSYVOICE_PROMPT_WAV", fieldValue("input-cosy-prompt-wav")],
+      ["COSYVOICE_PROMPT_TEXT", fieldValue("input-cosy-prompt-text")],
+      ["COSYVOICE_SPEAKER", fieldValue("input-cosy-speaker")],
+      ["COSYVOICE_DEVICE", fieldValue("input-cosy-device") || "cpu"],
+    ];
+    for (const [name, value] of pairs) {
+      const problem = await saveVoiceKey(name, value);
+      if (problem) {
+        showVoiceNote(problem);
+        setDotStatus("status-cosyvoice", "red");
+        return;
+      }
     }
     await loadStatus();
-
     const notice = document.getElementById("keys-restart-notice");
-    if (notice) notice.style.display = savedAny ? "block" : "none";
+    if (notice) notice.style.display = "block";
   });
 
-  // Save voice ID
-  document.getElementById("btn-save-voice-id")?.addEventListener("click", async () => {
-    const voiceId = (document.getElementById("input-fish-voice-id") as HTMLInputElement).value.trim();
-    if (voiceId) {
-      await apiPost("/api/settings/keys", { key_name: "FISH_VOICE_ID", key_value: voiceId });
-    }
-  });
-
-  // Test Fish
-  document.getElementById("btn-test-fish")?.addEventListener("click", async () => {
-    setDotStatus("status-fish", "yellow");
-    const key = (document.getElementById("input-fish-key") as HTMLInputElement).value.trim();
+  document.getElementById("btn-test-cosyvoice")?.addEventListener("click", async () => {
+    setDotStatus("status-cosyvoice", "yellow");
+    showVoiceNote("Checking the model folder and the CosyVoice install…");
     try {
-      const result = await apiPost<{ valid: boolean; error?: string }>("/api/settings/test-fish", { key_value: key || undefined });
-      setDotStatus("status-fish", result.valid ? "green" : "red");
+      const result = await apiPost<{ valid: boolean; error?: string; detail?: string }>(
+        "/api/settings/test-cosyvoice", {});
+      setDotStatus("status-cosyvoice", result.valid ? "green" : "red");
+      showVoiceNote(result.valid ? (result.detail || "CosyVoice is ready.") : (result.error || "CosyVoice is not ready."));
     } catch {
-      setDotStatus("status-fish", "red");
+      setDotStatus("status-cosyvoice", "red");
+      showVoiceNote("Could not reach the server.");
     }
   });
 
@@ -300,7 +369,7 @@ function enterSetupMode() {
 }
 
 function showSetupStep(step: number) {
-  const sections = ["section-api-keys", "section-preferences"];
+  const sections = ["section-voice", "section-preferences"];
   sections.forEach((id, i) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -328,7 +397,7 @@ async function advanceSetup() {
     if (nav) nav.style.display = "none";
 
     // Show all sections
-    ["section-api-keys", "section-status", "section-preferences", "section-sysinfo"].forEach((id) => {
+    ["section-voice", "section-status", "section-preferences", "section-sysinfo"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.style.display = "";
     });
@@ -364,7 +433,7 @@ export async function openSettings() {
   await loadPreferences();
 
   // Check for first-time setup
-  if (status && !status.env_keys_set.fish_audio) {
+  if (status && !status.env_keys_set.cosyvoice) {
     enterSetupMode();
   }
 }
@@ -388,7 +457,7 @@ export function isSettingsOpen(): boolean {
 export async function checkFirstTimeSetup(): Promise<boolean> {
   try {
     const status = await apiGet<StatusResponse>("/api/settings/status");
-    if (!status.env_keys_set.fish_audio) {
+    if (!status.env_keys_set.cosyvoice) {
       openSettings();
       return true;
     }

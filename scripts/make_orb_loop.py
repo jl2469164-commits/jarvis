@@ -31,7 +31,7 @@ opacity lift, the Z-breathing `- bass * 10`, the outward shove on `bass > 0.05`
 and the per-particle syllable pulse on `mid > 0.1`). So this script hands the
 orb an object shaped exactly like an `AnalyserNode` whose spectrum is a
 speech-shaped envelope computed from the frame clock. Synthesising real TTS
-would spend the user's Fish Audio quota and change nothing on screen.
+would run a real TTS model and change nothing on screen.
 
 The envelope is not guesswork, and it is not eyeballed off a video. It was
 fitted to a measurement of a REAL `AnalyserNode`, configured exactly the way
@@ -324,7 +324,7 @@ canvas{display:block}</style>
   // A stand-in for the AnalyserNode `voice.ts` hands the orb while JARVIS
   // speaks. Same shape (frequencyBinCount + getByteFrequencyData), same
   // fftSize-256 bin count, same 0.8 smoothing; the spectrum is computed from
-  // the frame clock instead of arriving from Fish Audio. Every component is a
+  // the frame clock instead of arriving from the speaker. Every component is a
   // whole number of cycles per loop, so the envelope is exactly periodic.
   window.__speechAnalyser = function (opt) {
     const BINS = 128;                       // voice.ts: analyser.fftSize = 256

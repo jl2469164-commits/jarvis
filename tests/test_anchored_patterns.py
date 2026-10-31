@@ -269,6 +269,8 @@ SAMPLES = {
     "_HEADING": "# Title",
     "_TASK_HEADING": "## Task 1: wire the executor",
     "_CHECKBOX": "- [x] done",
+    # preflight treats `.env.example` placeholders (`your-…-here`) as unset.
+    "_PLACEHOLDER_SECRET": "your-xai-api-key-here",
 }
 
 ALPHABET = ("abcdefghijklmnopqrstuvwxyz0123456789"

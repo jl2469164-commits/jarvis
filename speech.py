@@ -154,10 +154,10 @@ MAX_RESUMES = 3                  # an utterance interrupted more often than this
 # the bound, the next ack is "for a chunk that went out" — three messages
 # marked six chunks played while none had, and `wait_for` opened a steer's
 # cancel window over audio nobody had heard. The length comes from the mp3
-# itself (`mp3_seconds`), scaled DOWN so it is a floor and never an estimate,
-# and capped well under `ack_timeout` so a held ack can never look like a
-# client that went away. A blob that is not mp3 (every test fake) has no
-# floor at all — which is the old behaviour, exactly.
+# itself (`mp3_seconds` or `wav_seconds`), scaled DOWN so it is a floor and
+# never an estimate, and capped well under `ack_timeout` so a held ack can
+# never look like a client that went away. A blob that is neither mp3 nor
+# wav (every test fake) has no floor at all — which is the old behaviour.
 ACK_FLOOR_FACTOR = 0.9
 ACK_FLOOR_MAX_SEC = 30.0
 RESUME_ACK_GRACE_SEC = 1.0       # after a kept chunk's floor, how long a resume waits for its ack
@@ -170,8 +170,7 @@ _MP3_KBPS_V2 = {1: 8, 2: 16, 3: 24, 4: 32, 5: 40, 6: 48, 7: 56, 8: 64,
 
 def mp3_seconds(data: Optional[bytes]) -> float:
     """How long this MPEG Layer III audio plays, from its first frame header
-    (constant bitrate, which is what Fish Audio emits). 0.0 for anything
-    that is not one — no header, no floor."""
+    (constant bitrate). 0.0 for anything that is not one — no header, no floor."""
     if not data:
         return 0.0
     i = 0
@@ -191,8 +190,44 @@ def mp3_seconds(data: Optional[bytes]) -> float:
     return 0.0
 
 
+def wav_seconds(data: Optional[bytes]) -> float:
+    """How long a PCM WAV plays, from its fmt and data chunks. 0.0 otherwise.
+
+    CosyVoice returns one WAV per sentence. The browser decodes that blob
+    directly; this is only the server-side ack floor.
+    """
+    if not data or len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        return 0.0
+    pos = 12
+    channels = rate = width = None
+    data_bytes = None
+    while pos + 8 <= len(data):
+        chunk_id = data[pos:pos + 4]
+        size = int.from_bytes(data[pos + 4:pos + 8], "little")
+        start = pos + 8
+        if chunk_id == b"fmt " and size >= 16 and start + 16 <= len(data):
+            channels = int.from_bytes(data[start + 2:start + 4], "little")
+            rate = int.from_bytes(data[start + 4:start + 8], "little")
+            width = int.from_bytes(data[start + 14:start + 16], "little") // 8
+        elif chunk_id == b"data":
+            data_bytes = min(size, max(0, len(data) - start))
+        step = start + size + (size & 1)
+        if step <= pos:
+            break
+        pos = step
+    if not rate or not channels or not width or not data_bytes:
+        return 0.0
+    frame = rate * channels * width
+    if frame <= 0:
+        return 0.0
+    return data_bytes / frame
+
+
 def ack_floor_seconds(audio: Optional[bytes]) -> float:
-    return min(mp3_seconds(audio) * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
+    seconds = mp3_seconds(audio)
+    if seconds <= 0:
+        seconds = wav_seconds(audio)
+    return min(seconds * ACK_FLOOR_FACTOR, ACK_FLOOR_MAX_SEC)
 
 # A one- or two-word utterance whose every token JARVIS just said is only an
 # echo if it arrived while that speech was still coming out of the speaker.
@@ -1076,7 +1111,7 @@ class SpeechScheduler:
                     # so inserting it now would let that ack land on the
                     # bridge. Wait for the ack — at most the audio's own
                     # length plus a grace — before resuming. Only audio with
-                    # a readable length (mp3, which is all tts.py asks for)
+                    # a readable length (mp3, or the WAV CosyVoice returns)
                     # can be waited for; a blob with no floor resumes at once,
                     # as before.
                     self._kick_later(kept.earliest_ack + RESUME_ACK_GRACE_SEC - now)

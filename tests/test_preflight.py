@@ -381,19 +381,89 @@ def test_the_startup_check_never_takes_a_picture(monkeypatch):
     assert preflight._check_screen_recording_sync().status == STATUS_OK
 
 
-# --- FISH_API_KEY -------------------------------------------------------------
+# --- CosyVoice (local voice) ---------------------------------------------------
 
-def test_fish_api_key_present(monkeypatch):
-    monkeypatch.setenv("FISH_API_KEY", "sk-fish-abc123")
-    check = preflight._check_fish_api_key_sync()
+def _cosyvoice_tree(tmp_path, *, yaml_name="cosyvoice2.yaml"):
+    model = tmp_path / "CosyVoice2-0.5B"
+    model.mkdir()
+    (model / yaml_name).write_text("sample_rate: 24000\n", encoding="utf-8")
+    prompt = tmp_path / "prompt.wav"
+    prompt.write_bytes(b"RIFF")
+    return model, prompt
+
+
+def _point_at_cosyvoice(monkeypatch, model, prompt, *, device="cpu", importable=True):
+    monkeypatch.setenv("COSYVOICE_MODEL_DIR", str(model))
+    monkeypatch.setenv("COSYVOICE_PROMPT_WAV", str(prompt))
+    monkeypatch.setenv("COSYVOICE_PROMPT_TEXT", "Good evening, sir.")
+    monkeypatch.setenv("COSYVOICE_DEVICE", device)
+    monkeypatch.delenv("COSYVOICE_SPEAKER", raising=False)
+    monkeypatch.delenv("COSYVOICE_REPO", raising=False)
+    monkeypatch.setattr(preflight.tts, "cosyvoice_importable", lambda repo="": importable)
+
+
+def test_cosyvoice_ready_on_cpu_says_it_is_slow(monkeypatch, tmp_path):
+    model, prompt = _cosyvoice_tree(tmp_path)
+    _point_at_cosyvoice(monkeypatch, model, prompt)
+    check = preflight._check_cosyvoice_sync()
+    assert check.name == "cosyvoice"
     assert check.status == STATUS_OK
+    assert check.remedy is None
+    assert "slow" in check.message
+    assert "CosyVoice2" in check.message
 
 
-def test_fish_api_key_absent(monkeypatch):
-    monkeypatch.delenv("FISH_API_KEY", raising=False)
-    check = preflight._check_fish_api_key_sync()
+def test_cosyvoice_missing_model_dir(monkeypatch):
+    monkeypatch.delenv("COSYVOICE_MODEL_DIR", raising=False)
+    check = preflight._check_cosyvoice_sync()
     assert check.status == STATUS_FAIL
+    assert "COSYVOICE_MODEL_DIR" in check.message
     assert check.remedy
+    assert "docs/cosyvoice.md" in check.remedy
+
+
+def test_cosyvoice_dir_without_weights_fails(monkeypatch, tmp_path):
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setenv("COSYVOICE_MODEL_DIR", str(empty))
+    check = preflight._check_cosyvoice_sync()
+    assert check.status == STATUS_FAIL
+    assert "llm.pt" in check.message
+
+
+def test_cosyvoice_needs_a_voice(monkeypatch, tmp_path):
+    model, _prompt = _cosyvoice_tree(tmp_path)
+    monkeypatch.setenv("COSYVOICE_MODEL_DIR", str(model))
+    monkeypatch.delenv("COSYVOICE_PROMPT_WAV", raising=False)
+    monkeypatch.delenv("COSYVOICE_PROMPT_TEXT", raising=False)
+    monkeypatch.delenv("COSYVOICE_SPEAKER", raising=False)
+    check = preflight._check_cosyvoice_sync()
+    assert check.status == STATUS_FAIL
+    assert "voice" in check.message.lower()
+
+
+def test_cosyvoice_missing_package_fails(monkeypatch, tmp_path):
+    model, prompt = _cosyvoice_tree(tmp_path)
+    _point_at_cosyvoice(monkeypatch, model, prompt, importable=False)
+    check = preflight._check_cosyvoice_sync()
+    assert check.status == STATUS_FAIL
+    assert "not importable" in check.message
+    assert check.remedy
+
+
+def test_cosyvoice_speaker_id_is_enough_without_a_prompt(monkeypatch, tmp_path):
+    model, _prompt = _cosyvoice_tree(tmp_path, yaml_name="cosyvoice.yaml")
+    monkeypatch.setenv("COSYVOICE_MODEL_DIR", str(model))
+    monkeypatch.delenv("COSYVOICE_PROMPT_WAV", raising=False)
+    monkeypatch.delenv("COSYVOICE_PROMPT_TEXT", raising=False)
+    monkeypatch.setenv("COSYVOICE_SPEAKER", "jarvis")
+    monkeypatch.setenv("COSYVOICE_DEVICE", "cpu")
+    monkeypatch.delenv("COSYVOICE_REPO", raising=False)
+    monkeypatch.setattr(preflight.tts, "cosyvoice_importable", lambda repo="": True)
+    check = preflight._check_cosyvoice_sync()
+    assert check.status == STATUS_OK
+    assert "CosyVoice model at" in check.message
+    assert "CosyVoice2 model" not in check.message
 
 
 # --- leftover ANTHROPIC_* ------------------------------------------------------
@@ -514,17 +584,20 @@ async def test_run_checks_never_raises_even_with_a_broken_check(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_checks_runs_all_registered_checks(monkeypatch):
-    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)  # claude missing -> fast fail
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)  # cursor CLI missing -> fast fail
     monkeypatch.setattr(preflight.sys, "platform", "linux")  # accessibility skipped -> fast warn
     monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("COSYVOICE_MODEL_DIR", raising=False)
     monkeypatch.setattr(preflight, "_settings_path", lambda: preflight.Path("/nonexistent/settings.json"))
 
     results = await preflight.run_checks(timeout=1.0)
     names = {c.name for c in results}
     assert names == {
-        "claude_cli", "claude_login", "accessibility", "screen_recording",
-        "fish_api_key", "anthropic_key_leftover", "cross_session_inbound",
+        "cursor_cli", "accessibility", "screen_recording",
+        "cosyvoice", "anthropic_key_leftover", "cross_session_inbound",
     }
+    assert "claude_cli" not in names
+    assert "claude_login" not in names
 
 
 # --- spoken_summary -------------------------------------------------------------
@@ -566,12 +639,12 @@ def test_spoken_summary_says_screen_recording_in_words_a_person_would_use():
 def test_spoken_summary_names_two_failures_and_matches_the_example():
     checks = [
         Check(name="claude_login", status=STATUS_FAIL, message="Claude Code is not logged in."),
-        Check(name="fish_api_key", status=STATUS_FAIL, message="FISH_API_KEY is not set."),
+        Check(name="cosyvoice", status=STATUS_FAIL, message="COSYVOICE_MODEL_DIR is not set."),
     ]
     summary = preflight.spoken_summary(checks)
     assert summary == (
         "Two things need attention, sir: Claude Code isn't logged in, "
-        "and I have no Fish Audio key."
+        "and CosyVoice isn't configured."
     )
 
 
@@ -596,3 +669,135 @@ def test_spoken_summary_warn_counts_as_something_wrong():
     summary = preflight.spoken_summary(checks)
     assert summary != ""
     assert "One thing needs attention" in summary
+
+
+# --- Cursor CLI (default gate) ------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_cursor_cli_missing_from_path(monkeypatch):
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
+    check = await preflight._check_cursor_cli()
+    assert check.name == "cursor_cli"
+    assert check.status == STATUS_FAIL
+    assert "PATH" in check.message
+    assert check.remedy
+    assert "API key" in check.remedy
+
+
+@pytest.mark.asyncio
+async def test_cursor_cli_help_ok(monkeypatch):
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: "/usr/local/bin/agent" if name == "agent" else None)
+    monkeypatch.setattr(
+        preflight, "_run_subprocess",
+        _fake_run_subprocess({("/usr/local/bin/agent", "--help"): (0, "agent 1.2.3\n", "")}),
+    )
+    check = await preflight._check_cursor_cli()
+    assert check.status == STATUS_OK
+    assert "1.2.3" in check.message
+    assert check.remedy is None
+
+
+@pytest.mark.asyncio
+async def test_cursor_cli_falls_back_to_version_when_help_fails(monkeypatch):
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    monkeypatch.setattr(
+        preflight.shutil, "which",
+        lambda name: "/opt/cursor-agent" if name == "cursor-agent" else None,
+    )
+    monkeypatch.setattr(
+        preflight, "_run_subprocess",
+        _fake_run_subprocess({
+            ("/opt/cursor-agent", "--help"): (1, "", "no help"),
+            ("/opt/cursor-agent", "--version"): (0, "cursor-agent 2026.1.0\n", ""),
+        }),
+    )
+    check = await preflight._check_cursor_cli()
+    assert check.status == STATUS_OK
+    assert "2026.1.0" in check.message
+
+
+@pytest.mark.asyncio
+async def test_cursor_cli_smoke_failure_is_warn(monkeypatch):
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: "/usr/local/bin/agent" if name == "agent" else None)
+    monkeypatch.setattr(
+        preflight, "_run_subprocess",
+        _fake_run_subprocess({
+            ("/usr/local/bin/agent", "--help"): (1, "", "broken"),
+            ("/usr/local/bin/agent", "--version"): (1, "", "broken"),
+        }),
+    )
+    check = await preflight._check_cursor_cli()
+    assert check.status == STATUS_WARN
+    assert check.remedy
+
+
+@pytest.mark.asyncio
+async def test_cursor_cli_override_must_be_executable(monkeypatch):
+    monkeypatch.setenv("JARVIS_CURSOR_AGENT", "/no/such/agent")
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
+    check = await preflight._check_cursor_cli()
+    assert check.status == STATUS_FAIL
+    assert "not an executable" in check.message
+
+
+def test_spoken_summary_names_a_missing_cursor_cli():
+    checks = [
+        Check(name="cursor_cli", status=STATUS_FAIL,
+              message="Neither `agent` nor `cursor-agent` is on PATH."),
+    ]
+    summary = preflight.spoken_summary(checks)
+    assert "Cursor CLI isn't installed" in summary
+
+
+@pytest.mark.asyncio
+async def test_legacy_claude_checks_are_opt_in(monkeypatch):
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
+    monkeypatch.setattr(preflight.sys, "platform", "linux")
+    monkeypatch.delenv("FISH_API_KEY", raising=False)
+    monkeypatch.delenv("JARVIS_CURSOR_AGENT", raising=False)
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(preflight, "_settings_path", lambda: preflight.Path("/nonexistent/settings.json"))
+
+    default = {c.name for c in await preflight.run_checks(timeout=1.0)}
+    assert "claude_cli" not in default
+    assert "claude_login" not in default
+
+    legacy = {c.name for c in await preflight.run_checks(
+        timeout=1.0, include_legacy_claude=True)}
+    assert legacy == default | {"claude_cli", "claude_login"}
+
+
+def test_env_example_documents_cursor_cli_without_secret_fields():
+    """The template is copied to .env on first settings write. No API-key fields."""
+    from pathlib import Path
+    text = (Path(__file__).parent.parent / ".env.example").read_text(encoding="utf-8")
+    assert "JARVIS_CURSOR_AGENT" in text
+    assert "JARVIS_BRAIN_MODEL" in text
+    assert "COSYVOICE_MODEL_DIR=" in text
+    assert "COSYVOICE_DEVICE=" in text
+    assert "FISH_API_KEY" in text  # deprecated comment only
+    assert "XAI_API_KEY=" not in text
+    assert "Aider" not in text
+    for name in ("OPENAI_API_KEY=", "OPENROUTER_API_KEY=", "DEEPSEEK_API_KEY=",
+                 "GEMINI_API_KEY=", "CURSOR_API_KEY="):
+        assert name not in text
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        _key, _, value = stripped.partition("=")
+        assert not value.startswith("sk-"), stripped
+        assert not value.startswith("xai-"), stripped
+        # A single token that is not a path, a device, or a your-…-here
+        # placeholder is how a real key would land in this file.
+        single_token = value and not any(c.isspace() for c in value)
+        allowed = (
+            not single_token
+            or (value.startswith("your-") and value.endswith("-here"))
+            or value.startswith("/")
+            or value in {"cpu", "cuda", "mps"}
+        )
+        assert allowed, stripped

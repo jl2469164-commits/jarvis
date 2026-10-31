@@ -1,11 +1,13 @@
 """
 JARVIS preflight -- first-run environment checks.
 
-Every one of these has already bitten this project: `claude` missing or too
-old, not logged in (the voice brain runs on the user's *subscription*, never
-an API key -- see brain.py's SCRUBBED_ENV_PREFIXES), `crossSessionInbound`
-not accepting steers into other sessions, `osascript` lacking Accessibility
-so `answer_dialog`'s keystroke fails, and no Fish Audio key at all.
+Startup checks for the Cursor CLI brain and construction path: `agent` or
+`cursor-agent` on PATH (or `JARVIS_CURSOR_AGENT`), plus local CosyVoice,
+Accessibility, Screen Recording, and (still reported) Claude leftover /
+cross-session hints. No xAI key and no Aider key are required. Legacy
+`_check_claude_*` helpers remain for tests and for
+`run_checks(include_legacy_claude=True)`; they are not part of the default
+`run_checks()`.
 
 This module only *observes*. Nothing here writes a file, changes a setting,
 or grants a permission -- see `_check_cross_session_inbound_sync`'s
@@ -39,6 +41,7 @@ from typing import Optional
 
 import claude_env
 import screen
+import tts
 
 log = logging.getLogger("jarvis.preflight")
 
@@ -439,27 +442,26 @@ def _check_screen_recording_sync() -> Check:
     )
 
 
-def _check_fish_api_key_sync() -> Check:
-    """FISH_API_KEY must be set or JARVIS has no voice."""
-    if os.environ.get("FISH_API_KEY"):
-        return Check(name="fish_api_key", status=STATUS_OK, message="FISH_API_KEY is set.")
+def _check_cosyvoice_sync() -> Check:
+    """Local CosyVoice must be configured or JARVIS has no voice.
+
+    Filesystem and import checks only. This does not load the weights.
+    """
+    ready = tts.readiness()
     return Check(
-        name="fish_api_key",
-        status=STATUS_FAIL,
-        message="FISH_API_KEY is not set.",
-        remedy="Get a Fish Audio API key from fish.audio and set FISH_API_KEY in .env.",
+        name="cosyvoice",
+        status=ready.status,
+        message=ready.message,
+        remedy=ready.remedy,
     )
 
 
 def _check_anthropic_key_leftover_sync() -> Check:
-    """A leftover ANTHROPIC_* var signals a misconfigured .env.
+    """Report ANTHROPIC_* variables. The Cursor CLI path does not read them.
 
-    brain.py already scrubs every ANTHROPIC_* variable from the brain's
-    child process (see SCRUBBED_ENV_PREFIXES), so this can no longer make
-    the voice path silently bill an API key. It is still worth reporting:
-    its presence means someone put an Anthropic API key in `.env`, which is
-    not how this project authenticates (see brain-subscription-only-env-scrub
-    history) and is a sign the rest of the setup may be off too.
+    `cursor_cli.child_env()` still scrubs every ANTHROPIC_* variable from
+    spawned children, because a leftover key used to redirect Claude Code
+    onto API billing. The voice brain and the run executor do not use it.
     """
     leftover = sorted(k for k in os.environ if k.startswith("ANTHROPIC_"))
     if not leftover:
@@ -472,13 +474,10 @@ def _check_anthropic_key_leftover_sync() -> Check:
         name="anthropic_key_leftover",
         status=STATUS_WARN,
         message=(
-            f"{', '.join(leftover)} set in the environment. brain.py scrubs these "
-            "from the brain's child process, but this signals a misconfigured .env."
+            f"{', '.join(leftover)} set in the environment. The Cursor CLI "
+            "path does not read these, and children still have them scrubbed."
         ),
-        remedy=(
-            "Remove ANTHROPIC_* variables from .env -- JARVIS's voice brain runs "
-            "on your Claude subscription, not an API key."
-        ),
+        remedy="Remove ANTHROPIC_* variables from .env. JARVIS does not use an Anthropic API key.",
     )
 
 
@@ -624,10 +623,88 @@ def enable_cross_session_inbound() -> tuple[bool, str]:
     return True, str(path)
 
 
+# ── Cursor CLI (default gate) ────────────────────────────────────────────
+
+# `.env.example` uses placeholders of the form your-...-here. Copying a
+# template must not look like a configured secret. Nothing in the default
+# gate requires a secret; the pattern stays so a future placeholder cannot
+# sneak through a full-value check unnoticed.
+_PLACEHOLDER_SECRET = re.compile(r"^your-.+-here$")
+
+
+def _configured_secret(name: str) -> bool:
+    """True when `name` is set to something other than a documented placeholder."""
+    value = os.environ.get(name, "").strip()
+    if not value or _PLACEHOLDER_SECRET.fullmatch(value):
+        return False
+    return True
+
+
+def _cursor_binary() -> tuple[str | None, str | None]:
+    """`(path, problem)`. `problem` is set when the override or PATH lookup fails."""
+    explicit = os.environ.get("JARVIS_CURSOR_AGENT", "").strip()
+    if explicit:
+        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
+            return explicit, None
+        found = shutil.which(explicit)
+        if found:
+            return found, None
+        return None, (
+            f"JARVIS_CURSOR_AGENT={explicit!r} is not an executable."
+        )
+    found = shutil.which("agent") or shutil.which("cursor-agent")
+    if not found:
+        return None, "Neither `agent` nor `cursor-agent` is on PATH."
+    return found, None
+
+
+async def _check_cursor_cli(timeout: float = DEFAULT_CHECK_TIMEOUT) -> Check:
+    """The Cursor CLI is on PATH and answers a non-destructive `--help` or `--version`.
+
+    Does not log in, does not send a prompt, and does not require an API key.
+    A binary that exists but whose smoke command fails is a warning: the
+    install is there, and the remedy is to run it by hand.
+    """
+    binary, problem = _cursor_binary()
+    if not binary:
+        return Check(
+            name="cursor_cli",
+            status=STATUS_FAIL,
+            message=problem or "Cursor CLI is not on PATH.",
+            remedy=(
+                "Install the Cursor CLI (https://cursor.com/docs/cli/overview) "
+                "so `agent` or `cursor-agent` is on PATH, then run `agent login`. "
+                "Set JARVIS_CURSOR_AGENT if the binary lives somewhere else. "
+                "No API key is required."
+            ),
+        )
+    rc, stdout, stderr = await _run_subprocess(binary, "--help", timeout=timeout)
+    if rc != 0:
+        rc, stdout, stderr = await _run_subprocess(binary, "--version", timeout=timeout)
+        if rc != 0:
+            detail = (stderr or stdout).strip().splitlines()[:1]
+            detail_s = detail[0] if detail else f"exit {rc}"
+            return Check(
+                name="cursor_cli",
+                status=STATUS_WARN,
+                message=f"`{binary}` did not answer `--help` or `--version`: {detail_s}",
+                remedy="Run `agent --help` yourself and fix the binary on PATH.",
+            )
+    summary = (stdout or stderr or "").strip().splitlines()[:1]
+    summary_s = summary[0] if summary else binary
+    return Check(
+        name="cursor_cli",
+        status=STATUS_OK,
+        message=f"Cursor CLI available ({summary_s}).",
+    )
+
+
 # ── running them all ─────────────────────────────────────────────────────
 
-_ASYNC_CHECKS = (_check_claude_cli, _check_claude_login, _check_accessibility)
-_SYNC_CHECKS = (_check_fish_api_key_sync, _check_anthropic_key_leftover_sync,
+# Opt-in only. Default startup must not require the Claude CLI.
+_LEGACY_CLAUDE_CHECKS = (_check_claude_cli, _check_claude_login)
+_ASYNC_CHECKS = (_check_cursor_cli, _check_accessibility)
+_SYNC_CHECKS = (_check_cosyvoice_sync, _check_anthropic_key_leftover_sync,
                 _check_cross_session_inbound_sync, _check_screen_recording_sync)
 
 
@@ -656,13 +733,20 @@ async def _run_one(fn, *, is_async: bool, timeout: float) -> Check:
         return Check(name=name, status=STATUS_WARN, message=f"Check '{name}' raised: {e}")
 
 
-async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT) -> list[Check]:
+async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT,
+                     include_legacy_claude: bool = False) -> list[Check]:
     """Run every environment check concurrently, each individually time-boxed.
 
     Never raises. Safe to call at startup: the worst case is a handful of
     `warn` results after `timeout` seconds, not a hung or crashed server.
+
+    `include_legacy_claude` adds `claude_cli` and `claude_login`. Default
+    startup leaves them off: the gate that matters is `cursor_cli`.
     """
-    tasks = [_run_one(fn, is_async=True, timeout=timeout) for fn in _ASYNC_CHECKS]
+    async_checks = list(_ASYNC_CHECKS)
+    if include_legacy_claude:
+        async_checks = list(_LEGACY_CLAUDE_CHECKS) + async_checks
+    tasks = [_run_one(fn, is_async=True, timeout=timeout) for fn in async_checks]
     tasks += [_run_one(fn, is_async=False, timeout=timeout) for fn in _SYNC_CHECKS]
     return await asyncio.gather(*tasks)
 
@@ -675,6 +759,10 @@ async def run_checks(*, timeout: float = DEFAULT_CHECK_TIMEOUT) -> list[Check]:
 # the specific failure (e.g. "isn't installed" vs. "needs updating").
 def _phrase_for(check: Check) -> str:
     name, msg = check.name, check.message
+    if name == "cursor_cli":
+        if "PATH" in msg or "not an executable" in msg:
+            return "Cursor CLI isn't installed"
+        return "Cursor CLI couldn't be checked"
     if name == "claude_cli":
         if "not on PATH" in msg:
             return "Claude Code isn't installed"
@@ -693,6 +781,16 @@ def _phrase_for(check: Check) -> str:
         if "not been granted" in msg:
             return "I don't have Screen Recording permission"
         return "Screen Recording couldn't be checked"
+    if name == "cosyvoice":
+        lower = msg.lower()
+        if "not installed" in lower or "not importable" in lower:
+            return "CosyVoice isn't installed"
+        if any(bit in lower for bit in (
+            "not set", "not a directory", "not a file", "no cosyvoice",
+            "empty", "must be",
+        )):
+            return "CosyVoice isn't configured"
+        return "CosyVoice couldn't be checked"
     if name == "fish_api_key":
         return "I have no Fish Audio key"
     if name == "anthropic_key_leftover":

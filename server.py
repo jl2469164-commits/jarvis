@@ -3,7 +3,7 @@ JARVIS Server — Voice AI + Development Orchestration
 
 Handles:
 1. WebSocket voice interface (browser audio <-> LLM <-> TTS)
-2. Claude Code task manager (spawn/manage claude -p subprocesses)
+2. Cursor CLI task manager (spawn/manage `agent -p` subprocesses)
 3. Project awareness (scan Desktop for git repos)
 4. REST API for task management
 """
@@ -32,8 +32,9 @@ from pathlib import Path
 # writer forbade three characters — "\n", "\r", "\0" — and `str.splitlines()`
 # splits on ten, so `{"user_name": "Tony\x0bJARVIS_CLAUDE_PATH=/tmp/evil"}`
 # came back 200 and `_read_env()` then reported JARVIS_CLAUDE_PATH=/tmp/evil.
-# That is the binary the brain is spawned from, and /api/restart is one call
-# away. Extending the blocklist to ten characters would have left the same
+# A path override such as JARVIS_CURSOR_AGENT is the binary the brain is
+# spawned from, and /api/restart is one call away. Extending the blocklist
+# to ten characters would have left the same
 # shape of bug for the next separator; deriving the writer's rule from the
 # reader's parser cannot.
 def _parse_env_lines(text: str) -> list[tuple[str, str]]:
@@ -95,9 +96,7 @@ log = logging.getLogger("jarvis")
 # Config
 # ---------------------------------------------------------------------------
 
-FISH_API_KEY = os.getenv("FISH_API_KEY", "")
-FISH_VOICE_ID = os.getenv("FISH_VOICE_ID", "612b878b113047d9a770c069c8b4fdfe")  # JARVIS (MCU)
-FISH_API_URL = "https://api.fish.audio/v1/tts"
+# Voice is local CosyVoice (tts.py). The settings panel writes COSYVOICE_*.
 USER_NAME = os.getenv("USER_NAME", "sir")
 _SKIP_PERMISSIONS = os.getenv("JARVIS_SKIP_PERMISSIONS", "true").lower() not in ("0", "false", "no")
 
@@ -457,39 +456,18 @@ _last_greeting_time: float = 0
 
 
 # ---------------------------------------------------------------------------
-# TTS (Fish Audio)
+# TTS (local CosyVoice — one WAV blob per call)
 # ---------------------------------------------------------------------------
 
 async def synthesize_speech(text: str) -> Optional[bytes]:
-    """Generate speech audio from text using Fish Audio TTS."""
-    if not FISH_API_KEY:
-        log.warning("FISH_API_KEY not set, skipping TTS")
+    """Generate one complete WAV clip with local CosyVoice."""
+    r = await tts.synthesize_chunk(text)
+    if r is None:
+        log.warning("CosyVoice produced no audio")
         return None
-
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as http:
-            response = await http.post(
-                FISH_API_URL,
-                headers={
-                    "Authorization": f"Bearer {FISH_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "text": text,
-                    "reference_id": FISH_VOICE_ID,
-                    "format": "mp3",
-                },
-            )
-            if response.status_code == 200:
-                _session_tokens["tts_calls"] += 1
-                _append_usage_entry(0, 0, "tts")
-                return response.content
-            else:
-                log.error(f"TTS error: {response.status_code}")
-                return None
-    except Exception as e:
-        log.error(f"TTS error: {e}")
-        return None
+    _session_tokens["tts_calls"] += 1
+    _append_usage_entry(0, 0, "tts")
+    return r.audio
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +481,6 @@ brain_instance: Optional[Brain] = None
 speech: Optional[SpeechScheduler] = None
 session_watcher: "session_watch.SessionWatcher | None" = None
 session_clients: set = set()
-_tts_client: Optional[httpx.AsyncClient] = None
 _brain_notice_at = {"restarting": 0.0}
 _bg_tasks: set[asyncio.Task] = set()
 _CONTENT_FRAMES = ("audio", "text")
@@ -611,7 +588,7 @@ async def _voice_emit(msg: dict) -> None:
 
 
 async def _synth_for_speech(text: str) -> Optional[bytes]:
-    r = await tts.synthesize_chunk(text, api_key=FISH_API_KEY, voice_id=FISH_VOICE_ID, client=_tts_client)
+    r = await tts.synthesize_chunk(text)
     if r is None:
         return None
     _session_tokens["tts_calls"] += 1
@@ -939,8 +916,7 @@ def _active_project_names() -> list[str]:
 
 
 async def start_brain_and_speech() -> None:
-    global brain_instance, speech, _tts_client
-    _tts_client = httpx.AsyncClient(timeout=15.0)
+    global brain_instance, speech
     speech = SpeechScheduler(lambda t: _synth_for_speech(t), _voice_emit, prepare=strip_markdown_for_tts,
                              transport_ready=lambda: bool(voice_clients))
     await speech.start()
@@ -1139,9 +1115,9 @@ async def _maybe_rotate() -> None:
 
 
 async def stop_brain_and_speech() -> None:
-    """Stop the brain first (no more turns), then the mouth, then the HTTP client.
+    """Stop the brain first (no more turns), then the mouth.
     Each step is isolated so one failure cannot leak the others."""
-    global brain_instance, speech, _tts_client
+    global brain_instance, speech
     # A generation must never vanish without a trace. The entry is written
     # whether or not the brain was in a state to write one itself, and the
     # whole step is wrapped: journalling must never prevent shutdown.
@@ -1164,15 +1140,14 @@ async def stop_brain_and_speech() -> None:
     except Exception as e:
         log.warning(f"shutdown journal failed: {e}")
     for label, coro in (("brain", brain_instance.stop() if brain_instance else None),
-                        ("speech", speech.stop() if speech else None),
-                        ("tts client", _tts_client.aclose() if _tts_client else None)):
+                        ("speech", speech.stop() if speech else None)):
         if coro is None:
             continue
         try:
             await coro
         except Exception as e:
             log.warning(f"shutdown: {label} did not stop cleanly: {e}")
-    brain_instance, speech, _tts_client = None, None, None
+    brain_instance, speech = None, None
 
 
 # Completions are held and spoken together at the next pause: the user asked
@@ -1856,9 +1831,9 @@ async def health():
 async def tts_test():
     """Generate a test audio clip for debugging.
 
-    A POST, not a GET, because it spends the user's Fish Audio quota — and a
-    GET is the one method OriginGuard cannot cover, so as a GET this was an
-    <img> tag on any page the user visited, in a loop.
+    A POST, not a GET. Local CosyVoice is slow on CPU, and a GET is the one
+    method OriginGuard cannot cover, so as a GET this was an <img> tag on
+    any page the user visited, in a loop.
     """
     audio = await synthesize_speech("Testing audio, sir.")
     if audio:
@@ -5347,7 +5322,7 @@ REPO_SENSITIVE_REFUSAL = ("That's a private file, sir — credentials and keys "
 # Containment and the sensitive-file wall are unchanged and get this for
 # free — every path still goes through `repo_read.resolve_within`, so
 # JARVIS's own `.env` is refused exactly as any other project's is. That is
-# not incidental: his .env holds the Fish API key.
+# not incidental: his .env holds API keys and local config.
 
 JARVIS_SELF_NAME = "JARVIS"
 
@@ -6695,13 +6670,17 @@ async def voice_handler(ws: WebSocket):
 # The only keys any HTTP route may write into .env.
 #
 # The gate is here, at the one function that writes, rather than on each
-# endpoint: `JARVIS_CLAUDE_PATH` is the binary the brain spawns and
-# `JARVIS_PROJECT_ROOTS` is what counts as "inside a project" for every
-# containment check, so an endpoint that can write an arbitrary key is an
-# endpoint that can replace JARVIS's brain with /tmp/evil and then ask for
-# a restart.
+# endpoint: `JARVIS_CURSOR_AGENT` is the binary the brain and the run
+# executor spawn, and `JARVIS_PROJECT_ROOTS` is what counts as "inside a
+# project" for every containment check, so an endpoint that can write an
+# arbitrary key is an endpoint that can replace JARVIS's brain with
+# /tmp/evil and then ask for a restart.
 SETTABLE_ENV_KEYS = frozenset({
-    "FISH_API_KEY", "FISH_VOICE_ID", "USER_NAME", "HONORIFIC",
+    # The settings panel still posts these. tts.py does not read them.
+    "FISH_API_KEY", "FISH_VOICE_ID",
+    "COSYVOICE_MODEL_DIR", "COSYVOICE_PROMPT_WAV", "COSYVOICE_PROMPT_TEXT",
+    "COSYVOICE_SPEAKER", "COSYVOICE_DEVICE", "COSYVOICE_REPO",
+    "USER_NAME", "HONORIFIC",
 })
 
 # A value may not carry anything that ends the line it is written on.
@@ -6726,8 +6705,8 @@ SETTABLE_ENV_KEYS = frozenset({
 # through `.env`, and into the brain — a paragraph of somebody's choosing
 # standing in the system prompt as JARVIS's own words.
 #
-# So two bounds, because the keys are two kinds of thing. A Fish Audio key is
-# an opaque token and needs room; a NAME is a name. Neither needs a thousand
+# So two bounds, because the keys are two kinds of thing. An opaque token
+# needs room; a NAME is a name. Neither needs a thousand
 # characters, and the name — the one that reaches the prompt — gets the
 # tighter one. Held against SETTABLE_ENV_KEYS itself by tests/test_bounds.py,
 # so a key added later is bounded the day it is added.
@@ -6848,40 +6827,44 @@ async def api_settings_keys(body: KeyUpdate):
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
     return {"success": True}
 
-@app.post("/api/settings/test-fish")
-async def api_test_fish(body: KeyTest):
-    key = body.key_value or os.getenv("FISH_API_KEY", "")
-    if not key:
-        return {"valid": False, "error": "No key provided"}
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.post(
-                "https://api.fish.audio/v1/tts",
-                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                json={"text": "test", "reference_id": FISH_VOICE_ID},
-            )
-            if resp.status_code in (200, 201):
-                return {"valid": True}
-            elif resp.status_code == 401:
-                return {"valid": False, "error": "Invalid API key"}
-            else:
-                return {"valid": False, "error": f"HTTP {resp.status_code}"}
-    except Exception as e:
-        return {"valid": False, "error": str(e)[:200]}
+def _cosyvoice_test_body() -> dict:
+    """File and import check only. Does not load the weights."""
+    ready = tts.readiness()
+    if ready.status == tts.STATUS_OK:
+        return {"valid": True, "detail": ready.message}
+    return {"valid": False, "error": ready.message}
+
+
+@app.post("/api/settings/test-cosyvoice")
+async def api_test_cosyvoice(body: KeyTest):
+    """Settings → Test CosyVoice. The body is ignored."""
+    del body
+    return _cosyvoice_test_body()
+
 
 @app.get("/api/settings/status")
 async def api_settings_status():
     import shutil as _shutil
     _, env_dict = _read_env()
     claude_installed = _shutil.which("claude") is not None
+    voice_ready = tts.readiness().status == tts.STATUS_OK
+    device = env_dict.get("COSYVOICE_DEVICE", "").strip().lower() or "cpu"
     return {
         "claude_code_installed": claude_installed,
         "server_port": 8340,
         "uptime_seconds": int(time.time() - _session_start),
         "env_keys_set": {
-            "fish_audio": bool(env_dict.get("FISH_API_KEY", "").strip() and env_dict.get("FISH_API_KEY", "") != "your-fish-audio-api-key-here"),
-            "fish_voice_id": bool(env_dict.get("FISH_VOICE_ID", "").strip()),
+            "cosyvoice": voice_ready,
             "user_name": env_dict.get("USER_NAME", ""),
+        },
+        "voice": {
+            "ready": voice_ready,
+            "model_dir": env_dict.get("COSYVOICE_MODEL_DIR", ""),
+            "repo": env_dict.get("COSYVOICE_REPO", ""),
+            "prompt_wav": env_dict.get("COSYVOICE_PROMPT_WAV", ""),
+            "prompt_text": env_dict.get("COSYVOICE_PROMPT_TEXT", ""),
+            "speaker": env_dict.get("COSYVOICE_SPEAKER", ""),
+            "device": device,
         },
     }
 

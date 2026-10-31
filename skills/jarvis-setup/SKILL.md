@@ -35,25 +35,40 @@ else looks fine, the first question is "did the URL's port change" — check
 `chrome://settings/content/microphone` for the exact origin in use, not just
 "is the mic allowed somewhere."
 
-## JARVIS runs on the Claude Code subscription — never an API key
+## Default preflight checks the Cursor CLI
 
-The voice brain (`brain.py`) is one long-lived `claude -p` process
-authenticated by the user's `claude` login, not the Anthropic API.
-`claude_env.child_env()` strips every `ANTHROPIC_*` variable (and
-`CLAUDE_CODE_*`, `CLAUDECODE`) from the environment handed to every spawned
-Claude Code child — brain and run pipeline alike — for one reason: the CLI
-silently *prefers* an inherited `ANTHROPIC_API_KEY` over the logged-in
-session, without saying so (`claude auth status` still reports
-`loggedIn: true` while billing moves to the key). So:
+`preflight.run_checks()` does not include `claude_cli` or `claude_login`,
+and it does not require `XAI_API_KEY` or any Aider provider key. It fails
+when neither `agent` nor `cursor-agent` is on PATH (or `JARVIS_CURSOR_AGENT`
+is set to something that is not executable). The smoke is `--help`, then
+`--version` if help fails. Pass `include_legacy_claude=True` to run the old
+Claude checks as well.
 
-- Putting `ANTHROPIC_API_KEY` in `.env` is not a setup step and does nothing
-  useful — it is a leftover from a different project's instructions, or a
-  misunderstanding, and is worth flagging if you see it.
-- Setup is exactly: install Claude Code (`npm install -g
-  @anthropic-ai/claude-code`, 2.1.224 or newer) and run `claude` once to log
-  in with a Claude subscription. No key, anywhere.
+`brain.py` and `run_executor.py` spawn that CLI through `cursor_cli.py`.
+Read `_ASYNC_CHECKS` / `_SYNC_CHECKS` in `preflight.py` rather than assuming
+a subscription or API-key gate is what startup runs.
+
+## The brain uses the Cursor CLI login — never an API key
+
+The voice brain is a long-lived supervisor (`cursor_cli supervise`) that
+runs `agent -p` once per turn. Construction runs are one `agent -p` each.
+Authentication is the user's existing `agent` login. `cursor_cli.child_env()`
+strips `CURSOR_API_KEY`, `XAI_API_KEY`, every `ANTHROPIC_*` variable, and
+`CLAUDE_CODE_*` / `CLAUDECODE` from the child. So:
+
+- Do not put `CURSOR_API_KEY`, `XAI_API_KEY`, or `ANTHROPIC_API_KEY` in
+  `.env` for JARVIS. Preflight warns on leftover `ANTHROPIC_*`
+  (`anthropic_key_leftover`).
+- Install the Cursor CLI and run `agent login`. If the binary is not named
+  `agent` or `cursor-agent`, set `JARVIS_CURSOR_AGENT` to its path.
 
 ## An expired login sounds like a JARVIS problem, not an auth problem
+
+The running brain is the Cursor CLI (`agent login`), not an API key. If that
+login is missing, preflight's `cursor_cli` check fails and a warm-up turn
+errors instead of hanging the server. The notes below are the older Claude
+Code failure, and they apply when `include_legacy_claude=True` is how you
+are checking — the spoken symptom is the same shape.
 
 When the CLI's OAuth session can't refresh, JARVIS's voice brain fails and
 says only **"my language systems are down"** — nothing more diagnostic than
@@ -92,14 +107,26 @@ does not follow the app there. Move it to `/Applications` and relaunch.
 error `-1728` / "not allowed assistive access") without ever triggering the
 permission prompt itself, and its remedy text carries this same guidance.
 
-## `FISH_API_KEY` is genuinely required — there is no fallback voice
+## Voice is local CosyVoice — there is no cloud TTS fallback
 
-`tts.py` calls the Fish Audio API directly; if the key is missing or empty,
-`synthesize_chunk` simply returns `None` — no error, no local TTS, no
-built-in voice of any kind. Without a real key from
-[fish.audio](https://fish.audio/), JARVIS has no voice at all, which reads
-to a new user as "it's just broken." This is the one piece of setup that
-cannot be skipped or worked around.
+`tts.py` synthesizes one WAV per sentence with CosyVoice (CosyVoice2 when
+`cosyvoice2.yaml` is in the model directory). The browser still decodes that
+blob with `AudioContext.decodeAudioData`; the orb UI is unchanged. If
+`COSYVOICE_MODEL_DIR` is missing, the prompt wav/text (or speaker id) is
+missing, or `import cosyvoice` fails, `synthesize_chunk` returns `None` and
+JARVIS goes silent — the reply shows up as text. That reads as "it's broken"
+to a new user. The install (checkout, weights, env) is `docs/cosyvoice.md`.
+
+`COSYVOICE_DEVICE=cpu` is the path that works without a GPU, including on a
+Mac. It is slow: several seconds per sentence. `cuda` is for NVIDIA.
+`mps` is best-effort on Apple Silicon; a failed op means switch back to
+`cpu` and restart. Intel Macs stay on `cpu`.
+
+The settings panel is Settings → Voice (CosyVoice). Test CosyVoice checks
+the folder and `import cosyvoice`. It does not download weights. A Mac user
+who needs the clone path, the 2 GB download, `afconvert`, and where to put
+the files should follow `docs/cosyvoice.md` and not a shorter paraphrase.
+Preflight check name is `cosyvoice`.
 
 ## Connecting a service: one file, and it is not the one you'd guess
 
